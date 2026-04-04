@@ -245,6 +245,7 @@ class ProxyHandler:
             "requests_proxied": self.request_count,
             "active_requests": self.active_requests,
             "socks_port": getattr(self, 'socks_port', None),
+            "socks_allowed_ips": sorted(getattr(self, '_socks_allowed_ips', set())),
         })
 
     async def handle_destroy(self, request: web.Request) -> web.Response:
@@ -662,6 +663,7 @@ async def run():
     log.info("Listening on 0.0.0.0:%d", proxy_port)
 
     # Start SOCKS5 proxy server
+    proxy._socks_allowed_ips = socks_allowed_ips
     socks5 = Socks5Server(proxy, allowed_ips=socks_allowed_ips)
     await socks5.start("0.0.0.0", socks_port)
     log.info("SOCKS5 proxy on port %d", socks_port)
