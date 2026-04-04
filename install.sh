@@ -57,7 +57,7 @@ banner() {
     echo -e "${CYAN}"
     echo "  ╔══════════════════════════════════════════╗"
     echo "  ║        Ghostwire Minion Installer        ║"
-    echo "  ║          v2026.04.05.1300                ║"
+    echo "  ║          v2026.04.05.1400                ║"
     echo "  ╚══════════════════════════════════════════╝"
     echo -e "${NC}"
 }
@@ -125,12 +125,23 @@ check_python() {
     if command -v python3 &>/dev/null; then
         if python3 -c "import sys; exit(0 if sys.version_info >= (3, 10) else 1)" 2>/dev/null; then
             info "Python $(python3 --version 2>&1 | awk '{print $2}') found"
-            # Ensure venv module is available (Debian/Ubuntu need version-specific package)
-            if ! python3 -c "import venv" 2>/dev/null && [[ "$PKG_MANAGER" == "apt" ]]; then
-                PY_VER=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
-                warn "python3-venv not available — installing python${PY_VER}-venv..."
-                pkg_update
-                pkg_install "python${PY_VER}-venv" || pkg_install python3-venv || true
+            # Ensure venv+ensurepip are available (Debian/Ubuntu need version-specific package)
+            if [[ "$PKG_MANAGER" == "apt" ]]; then
+                if ! python3 -c "import ensurepip" 2>/dev/null; then
+                    PY_VER=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+                    warn "ensurepip not available — installing python${PY_VER}-venv..."
+                    pkg_update
+                    # Try version-specific first, then generic, then deadsnakes PPA
+                    if ! pkg_install "python${PY_VER}-venv" 2>/dev/null; then
+                        if ! pkg_install python3-venv 2>/dev/null; then
+                            warn "python${PY_VER}-venv not in repos — adding deadsnakes PPA..."
+                            pkg_install software-properties-common
+                            add-apt-repository -y ppa:deadsnakes/ppa 2>/dev/null || true
+                            pkg_update
+                            pkg_install "python${PY_VER}-venv" || true
+                        fi
+                    fi
+                fi
             fi
             return
         fi
@@ -472,9 +483,17 @@ verify() {
     esac
 
     if curl -sf "http://localhost:${PROXY_PORT}/health" >/dev/null 2>&1; then
-        info "Health check OK on port $PROXY_PORT"
+        info "Health check OK on port $PROXY_PORT (HTTP API)"
     else
-        warn "Health check not responding yet"
+        warn "HTTP API not responding yet on port $PROXY_PORT"
+    fi
+
+    # Check SOCKS5 port is listening
+    SOCKS_PORT=$((PROXY_PORT + 1))
+    if (echo > /dev/tcp/localhost/$SOCKS_PORT) 2>/dev/null; then
+        info "SOCKS5 proxy listening on port $SOCKS_PORT"
+    else
+        warn "SOCKS5 proxy not responding yet on port $SOCKS_PORT"
     fi
 
     echo ""
