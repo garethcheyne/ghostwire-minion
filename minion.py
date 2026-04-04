@@ -30,7 +30,7 @@ from aiohttp import web
 # ---------------------------------------------------------------------------
 
 CONFIG_FILE = Path(__file__).parent / "config.json"
-VERSION = "1.0.0"
+VERSION = "2026.04.04.1100"
 
 logging.basicConfig(
     level=logging.INFO,

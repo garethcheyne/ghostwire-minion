@@ -57,7 +57,7 @@ banner() {
     echo -e "${CYAN}"
     echo "  ╔══════════════════════════════════════════╗"
     echo "  ║        Ghostwire Minion Installer        ║"
-    echo "  ║              v1.0.0                      ║"
+    echo "  ║          v2026.04.04.1100                ║"
     echo "  ╚══════════════════════════════════════════╝"
     echo -e "${NC}"
 }
