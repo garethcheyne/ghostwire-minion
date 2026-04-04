@@ -54,11 +54,20 @@ error() { echo -e "${RED}[✗]${NC} $1"; exit 1; }
 ask()   { echo -ne "${CYAN}[?]${NC} $1"; }
 
 banner() {
+    # Read version from VERSION file (local clone or installed copy)
+    local ver="unknown"
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+    if [[ -f "$script_dir/VERSION" ]]; then
+        ver=$(cat "$script_dir/VERSION" | tr -d '[:space:]')
+    elif [[ -f "$INSTALL_DIR/VERSION" ]]; then
+        ver=$(cat "$INSTALL_DIR/VERSION" | tr -d '[:space:]')
+    fi
     echo -e "${CYAN}"
-    echo "  ╔══════════════════════════════════════════╗"
-    echo "  ║        Ghostwire Minion Installer        ║"
-    echo "  ║          v2026.04.05.1400                ║"
-    echo "  ╚══════════════════════════════════════════╝"
+    printf "  ╔══════════════════════════════════════════╗\n"
+    printf "  ║        Ghostwire Minion Installer        ║\n"
+    printf "  ║          %-32s║\n" "v${ver}"
+    printf "  ╚══════════════════════════════════════════╝\n"
     echo -e "${NC}"
 }
 
@@ -283,6 +292,7 @@ install_files() {
     if [[ -f "$SCRIPT_DIR/minion.py" ]]; then
         cp "$SCRIPT_DIR/minion.py"        "$INSTALL_DIR/"
         cp "$SCRIPT_DIR/requirements.txt" "$INSTALL_DIR/"
+        cp "$SCRIPT_DIR/VERSION"          "$INSTALL_DIR/" 2>/dev/null || true
     else
         # Clean up any stale clone from previous run
         rm -rf /tmp/gw-minion-tmp
@@ -290,6 +300,7 @@ install_files() {
         git clone --depth 1 "$REPO_URL" /tmp/gw-minion-tmp
         cp /tmp/gw-minion-tmp/minion.py        "$INSTALL_DIR/"
         cp /tmp/gw-minion-tmp/requirements.txt "$INSTALL_DIR/"
+        cp /tmp/gw-minion-tmp/VERSION          "$INSTALL_DIR/" 2>/dev/null || true
         rm -rf /tmp/gw-minion-tmp
     fi
 
@@ -297,7 +308,7 @@ install_files() {
     find "$INSTALL_DIR" -name "*.pyc" -delete 2>/dev/null || true
     find "$INSTALL_DIR" -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
 
-    info "Installed minion.py version: $(grep '^VERSION' "$INSTALL_DIR/minion.py" | head -1)"
+    info "Installed version: $(cat "$INSTALL_DIR/VERSION" 2>/dev/null || echo 'unknown')"
 
     info "Creating venv..."
     # Ensure the venv module is available (may need version-specific package on Debian/Ubuntu)

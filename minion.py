@@ -33,7 +33,8 @@ from aiohttp import web
 # ---------------------------------------------------------------------------
 
 CONFIG_FILE = Path(__file__).parent / "config.json"
-VERSION = "2026.04.05.1500"
+VERSION_FILE = Path(__file__).parent / "VERSION"
+VERSION = VERSION_FILE.read_text().strip() if VERSION_FILE.exists() else "0.0.0"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -303,7 +304,7 @@ class ProxyHandler:
                 return
 
             # Copy new files (preserve config.json)
-            for fname in ["minion.py", "requirements.txt", "install.sh"]:
+            for fname in ["minion.py", "requirements.txt", "install.sh", "VERSION"]:
                 src = tmp / fname
                 if src.exists():
                     dest = install_dir / fname
@@ -322,13 +323,10 @@ class ProxyHandler:
             # Cleanup
             subprocess.run(["rm", "-rf", str(tmp)], timeout=10)
 
-            # Read new version from the freshly pulled minion.py
+            # Read new version from VERSION file
             new_version = "unknown"
             try:
-                for line in (install_dir / "minion.py").read_text().splitlines():
-                    if line.strip().startswith("VERSION"):
-                        new_version = line.split("=", 1)[1].strip().strip('"').strip("'")
-                        break
+                new_version = (install_dir / "VERSION").read_text().strip()
             except Exception:
                 pass
             log.info("Upgrade complete: %s -> %s — restarting service", VERSION, new_version)
