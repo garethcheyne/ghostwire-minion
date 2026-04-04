@@ -156,6 +156,7 @@ class ProxyHandler:
         self.max_concurrent = 50
         self._latencies: list[float] = []
         self._public_ip: str | None = None
+        self.socks_port: int = 0
 
     @property
     def avg_latency_ms(self) -> float | None:
@@ -243,6 +244,7 @@ class ProxyHandler:
             "version": VERSION,
             "requests_proxied": self.request_count,
             "active_requests": self.active_requests,
+            "socks_port": getattr(self, 'socks_port', None),
         })
 
     async def handle_destroy(self, request: web.Request) -> web.Response:
@@ -363,6 +365,137 @@ class ProxyHandler:
 
 
 # ---------------------------------------------------------------------------
+# SOCKS5 proxy server (RFC 1928, no-auth, CONNECT only)
+# ---------------------------------------------------------------------------
+
+class Socks5Server:
+    """Minimal SOCKS5 proxy server (RFC 1928, no-auth, CONNECT only)"""
+
+    def __init__(self, proxy: ProxyHandler):
+        self.proxy = proxy
+        self._server = None
+
+    async def handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        """Handle a single SOCKS5 client connection"""
+        try:
+            # 1. Greeting: client sends version + methods
+            header = await reader.readexactly(2)
+            version, nmethods = header
+            if version != 0x05:
+                writer.close()
+                return
+            methods = await reader.readexactly(nmethods)
+
+            # 2. Select no-auth (0x00)
+            writer.write(b'\x05\x00')
+            await writer.drain()
+
+            # 3. Request: version, cmd, rsv, atyp, addr, port
+            req = await reader.readexactly(4)
+            ver, cmd, _, atyp = req
+
+            if cmd != 0x01:  # Only CONNECT
+                writer.write(b'\x05\x07\x00\x01' + b'\x00' * 6)
+                await writer.drain()
+                writer.close()
+                return
+
+            # Parse destination address
+            if atyp == 0x01:  # IPv4
+                addr_bytes = await reader.readexactly(4)
+                host = socket.inet_ntoa(addr_bytes)
+            elif atyp == 0x03:  # Domain
+                length = (await reader.readexactly(1))[0]
+                host = (await reader.readexactly(length)).decode()
+            elif atyp == 0x04:  # IPv6
+                addr_bytes = await reader.readexactly(16)
+                host = socket.inet_ntop(socket.AF_INET6, addr_bytes)
+            else:
+                writer.write(b'\x05\x08\x00\x01' + b'\x00' * 6)
+                await writer.drain()
+                writer.close()
+                return
+
+            port_bytes = await reader.readexactly(2)
+            port = int.from_bytes(port_bytes, 'big')
+
+            # Block private/internal targets
+            if _is_blocked_url(f"http://{host}:{port}"):
+                log.warning("SOCKS5 blocked connection to %s:%d (private network)", host, port)
+                writer.write(b'\x05\x02\x00\x01' + b'\x00' * 6)  # connection not allowed
+                await writer.drain()
+                writer.close()
+                return
+
+            # 4. Connect to target
+            try:
+                remote_reader, remote_writer = await asyncio.wait_for(
+                    asyncio.open_connection(host, port),
+                    timeout=30,
+                )
+            except Exception:
+                writer.write(b'\x05\x05\x00\x01' + b'\x00' * 6)  # connection refused
+                await writer.drain()
+                writer.close()
+                return
+
+            # 5. Send success response
+            # BND.ADDR and BND.PORT (use zeros)
+            writer.write(b'\x05\x00\x00\x01' + b'\x00\x00\x00\x00' + b'\x00\x00')
+            await writer.drain()
+
+            log.info("SOCKS5 CONNECT %s:%d \u2192 connected", host, port)
+            self.proxy.request_count += 1
+
+            # 6. Relay data bidirectionally
+            await self._relay(reader, writer, remote_reader, remote_writer)
+
+        except (asyncio.IncompleteReadError, ConnectionResetError, BrokenPipeError):
+            pass
+        except Exception as e:
+            log.debug("SOCKS5 session error: %s", e)
+        finally:
+            try:
+                writer.close()
+            except Exception:
+                pass
+
+    async def _relay(self, client_reader, client_writer, remote_reader, remote_writer):
+        """Bidirectional data relay between client and remote"""
+        async def pipe(src, dst, track_bytes=False):
+            try:
+                while True:
+                    data = await src.read(65536)
+                    if not data:
+                        break
+                    dst.write(data)
+                    await dst.drain()
+                    if track_bytes:
+                        self.proxy.bytes_transferred += len(data)
+            except (ConnectionResetError, BrokenPipeError, asyncio.CancelledError):
+                pass
+            finally:
+                try:
+                    dst.close()
+                except Exception:
+                    pass
+
+        await asyncio.gather(
+            pipe(client_reader, remote_writer, track_bytes=True),
+            pipe(remote_reader, client_writer, track_bytes=True),
+        )
+
+    async def start(self, host: str, port: int):
+        self._server = await asyncio.start_server(self.handle_client, host, port)
+        log.info("SOCKS5 proxy listening on %s:%d", host, port)
+
+    async def stop(self):
+        if self._server:
+            self._server.close()
+            await self._server.wait_closed()
+
+
+# ---------------------------------------------------------------------------
 # Parent communication
 # ---------------------------------------------------------------------------
 
@@ -371,7 +504,7 @@ class ParentClient:
         self.url = server_url.rstrip("/")
         self.headers = {"X-Worker-API-Key": api_key, "Content-Type": "application/json"}
 
-    async def register(self, proxy_port: int, public_ip: str | None) -> dict | None:
+    async def register(self, proxy_port: int, socks_port: int, public_ip: str | None) -> dict | None:
         geo = await get_ip_geo(public_ip) if public_ip else {}
         payload = {
             "hostname": socket.gethostname(),
@@ -381,6 +514,7 @@ class ParentClient:
             "python_version": platform.python_version(),
             "agent_version": VERSION,
             "tunnel_port": proxy_port,
+            "socks_port": socks_port,
             "country": geo.get("country"),
             "city": geo.get("city"),
             "isp": geo.get("isp"),
@@ -406,6 +540,7 @@ class ParentClient:
             "total_bytes_transferred": proxy.bytes_transferred,
             "avg_latency_ms": proxy.avg_latency_ms,
             "tunnel_port": proxy_port,
+            "socks_port": proxy.socks_port,
             "agent_version": VERSION,
         }
         try:
@@ -458,7 +593,10 @@ async def run():
     log.info("Parent: %s", server_url)
     log.info("Proxy port: %s", proxy_port)
 
+    socks_port = cfg.get("socks_port", proxy_port + 1)
+
     proxy = ProxyHandler(api_key, verify_ssl=cfg.get("verify_ssl", True))
+    proxy.socks_port = socks_port
     parent = ParentClient(server_url, api_key)
 
     # Detect public IP once at startup
@@ -469,7 +607,7 @@ async def run():
     # Register (retry up to 5 times)
     reg = None
     for attempt in range(5):
-        reg = await parent.register(proxy_port, proxy._public_ip)
+        reg = await parent.register(proxy_port, socks_port, proxy._public_ip)
         if reg:
             break
         wait = 5 * (attempt + 1)
@@ -495,6 +633,11 @@ async def run():
     await site.start()
     log.info("Listening on 0.0.0.0:%d", proxy_port)
 
+    # Start SOCKS5 proxy server
+    socks5 = Socks5Server(proxy)
+    await socks5.start("0.0.0.0", socks_port)
+    log.info("SOCKS5 proxy on port %d", socks_port)
+
     # Graceful shutdown
     stop = asyncio.Event()
 
@@ -511,6 +654,7 @@ async def run():
     await stop.wait()
 
     hb_task.cancel()
+    await socks5.stop()
     await parent.disconnect()
     await runner.cleanup()
     log.info("Minion stopped.")
