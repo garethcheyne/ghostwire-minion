@@ -33,7 +33,7 @@ from aiohttp import web
 # ---------------------------------------------------------------------------
 
 CONFIG_FILE = Path(__file__).parent / "config.json"
-VERSION = "2026.04.04.1100"
+VERSION = "2026.04.05.1200"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -261,6 +261,84 @@ class ProxyHandler:
         asyncio.get_event_loop().call_later(1, lambda: asyncio.ensure_future(self._self_destruct()))
         return resp
 
+    async def handle_upgrade(self, request: web.Request) -> web.Response:
+        """Pull latest code from Git, reinstall deps, restart the service."""
+        if request.headers.get("X-Minion-API-Key", "") != self.api_key:
+            return web.json_response({"error": "Unauthorized"}, status=401)
+
+        log.info("UPGRADE command received — starting upgrade")
+
+        # Respond before upgrading (the restart will kill this process)
+        resp = web.json_response({
+            "status": "upgrading",
+            "current_version": VERSION,
+            "message": "Pulling latest code and restarting",
+        })
+        await resp.prepare(request)
+        await resp.write_eof()
+
+        asyncio.get_event_loop().call_later(1, lambda: asyncio.ensure_future(self._self_upgrade()))
+        return resp
+
+    async def _self_upgrade(self):
+        """Pull latest code, install deps, restart service."""
+        install_dir = Path(__file__).parent
+        repo_url = "https://github.com/garethcheyne/ghostwire-minion.git"
+
+        try:
+            # Pull latest code into temp dir
+            tmp = Path("/tmp/gw-minion-upgrade")
+            if tmp.exists():
+                subprocess.run(["rm", "-rf", str(tmp)], timeout=10)
+            log.info("Cloning latest from %s", repo_url)
+            result = subprocess.run(
+                ["git", "clone", "--depth", "1", repo_url, str(tmp)],
+                capture_output=True, text=True, timeout=60,
+            )
+            if result.returncode != 0:
+                log.error("Git clone failed: %s", result.stderr)
+                return
+
+            # Copy new files (preserve config.json)
+            for fname in ["minion.py", "requirements.txt", "install.sh"]:
+                src = tmp / fname
+                if src.exists():
+                    dest = install_dir / fname
+                    dest.write_bytes(src.read_bytes())
+                    log.info("Updated %s", fname)
+
+            # Reinstall deps
+            venv_pip = install_dir / "venv" / "bin" / "pip"
+            if venv_pip.exists():
+                log.info("Installing requirements...")
+                subprocess.run(
+                    [str(venv_pip), "install", "--quiet", "-r", str(install_dir / "requirements.txt")],
+                    timeout=120, capture_output=True,
+                )
+
+            # Cleanup
+            subprocess.run(["rm", "-rf", str(tmp)], timeout=10)
+
+            # Read new version from the freshly pulled minion.py
+            new_version = "unknown"
+            try:
+                for line in (install_dir / "minion.py").read_text().splitlines():
+                    if line.strip().startswith("VERSION"):
+                        new_version = line.split("=", 1)[1].strip().strip('"').strip("'")
+                        break
+            except Exception:
+                pass
+            log.info("Upgrade complete: %s -> %s — restarting service", VERSION, new_version)
+
+            # Restart via systemd (or just exit and let systemd restart us)
+            subprocess.run(["systemctl", "restart", "ghostwire-minion"], timeout=10, capture_output=True)
+
+        except Exception as e:
+            log.error("Upgrade failed: %s", e)
+        finally:
+            # If systemctl restart didn't kill us, exit so systemd respawns
+            os._exit(0)
+
     async def _self_destruct(self):
         """Remove minion from the host OS"""
         try:
@@ -328,6 +406,7 @@ class ParentClient:
             "total_bytes_transferred": proxy.bytes_transferred,
             "avg_latency_ms": proxy.avg_latency_ms,
             "tunnel_port": proxy_port,
+            "agent_version": VERSION,
         }
         try:
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as s:
@@ -362,7 +441,11 @@ async def heartbeat_loop(parent: ParentClient, proxy: ProxyHandler, port: int, i
             # Check if parent indicates a newer version
             latest = result.get("latest_agent_version")
             if latest and latest != VERSION:
-                log.warning("New agent version available: %s (current: %s) — run install.sh to update", latest, VERSION)
+                log.warning("New agent version available: %s (current: %s)", latest, VERSION)
+                # Auto-upgrade if parent requests it
+                if result.get("upgrade_requested"):
+                    log.info("Parent requested upgrade — starting auto-upgrade")
+                    await proxy._self_upgrade()
 
 
 async def run():
@@ -404,6 +487,7 @@ async def run():
     app.router.add_post("/proxy", proxy.handle_proxy)
     app.router.add_get("/health", proxy.handle_health)
     app.router.add_post("/destroy", proxy.handle_destroy)
+    app.router.add_post("/upgrade", proxy.handle_upgrade)
 
     runner = web.AppRunner(app)
     await runner.setup()

@@ -57,7 +57,7 @@ banner() {
     echo -e "${CYAN}"
     echo "  ╔══════════════════════════════════════════╗"
     echo "  ║        Ghostwire Minion Installer        ║"
-    echo "  ║          v2026.04.04.1100                ║"
+    echo "  ║          v2026.04.05.1200                ║"
     echo "  ╚══════════════════════════════════════════╝"
     echo -e "${NC}"
 }
@@ -144,6 +144,7 @@ check_python() {
 ensure_cmd() {
     command -v "$1" &>/dev/null && return
     warn "$1 not found — installing..."
+    pkg_update
     # Map command names to package names per distro
     local pkg="$1"
     case "$PKG_MANAGER" in
@@ -263,6 +264,13 @@ install_files() {
     fi
 
     info "Creating venv..."
+    # Ensure the venv module is available (may need version-specific package on Debian/Ubuntu)
+    if ! python3 -c "import venv" 2>/dev/null && [[ "$PKG_MANAGER" == "apt" ]]; then
+        PY_VER=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+        warn "python3-venv not available — installing python${PY_VER}-venv..."
+        pkg_update
+        pkg_install "python${PY_VER}-venv" || pkg_install python3-venv || true
+    fi
     python3 -m venv "$INSTALL_DIR/venv" || {
         # Some minimal distros need ensurepip — try without pip then bootstrap
         warn "venv creation failed — trying without pip..."
