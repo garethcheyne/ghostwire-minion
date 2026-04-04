@@ -33,7 +33,7 @@ from aiohttp import web
 # ---------------------------------------------------------------------------
 
 CONFIG_FILE = Path(__file__).parent / "config.json"
-VERSION = "2026.04.05.1400"
+VERSION = "2026.04.05.1500"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -369,15 +369,27 @@ class ProxyHandler:
 # ---------------------------------------------------------------------------
 
 class Socks5Server:
-    """Minimal SOCKS5 proxy server (RFC 1928, no-auth, CONNECT only)"""
+    """Minimal SOCKS5 proxy server (RFC 1928, no-auth, CONNECT only).
 
-    def __init__(self, proxy: ProxyHandler):
+    Restricted to connections from allowed IPs only (parent server).
+    """
+
+    def __init__(self, proxy: ProxyHandler, allowed_ips: set[str] | None = None):
         self.proxy = proxy
+        self.allowed_ips = allowed_ips or set()
         self._server = None
 
     async def handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         """Handle a single SOCKS5 client connection"""
         try:
+            # Check source IP against allowlist
+            peer = writer.get_extra_info("peername")
+            client_ip = peer[0] if peer else None
+            if self.allowed_ips and client_ip not in self.allowed_ips:
+                log.warning("SOCKS5 rejected connection from %s (not in allowlist)", client_ip)
+                writer.close()
+                return
+
             # 1. Greeting: client sends version + methods
             header = await reader.readexactly(2)
             version, nmethods = header
@@ -599,6 +611,22 @@ async def run():
     proxy.socks_port = socks_port
     parent = ParentClient(server_url, api_key)
 
+    # Resolve parent server IP(s) for SOCKS5 allowlist
+    socks_allowed_ips = set()
+    try:
+        from urllib.parse import urlparse as _urlparse
+        parent_host = _urlparse(server_url).hostname
+        if parent_host:
+            parent_ips = socket.getaddrinfo(parent_host, None)
+            for info in parent_ips:
+                socks_allowed_ips.add(info[4][0])
+            # Also allow any extra IPs from config
+            for ip in cfg.get("socks_allowed_ips", []):
+                socks_allowed_ips.add(ip)
+            log.info("SOCKS5 allowlist: %s", socks_allowed_ips)
+    except Exception as e:
+        log.warning("Could not resolve parent IP for SOCKS5 allowlist: %s", e)
+
     # Detect public IP once at startup
     proxy._public_ip = await get_public_ip()
     if proxy._public_ip:
@@ -634,7 +662,7 @@ async def run():
     log.info("Listening on 0.0.0.0:%d", proxy_port)
 
     # Start SOCKS5 proxy server
-    socks5 = Socks5Server(proxy)
+    socks5 = Socks5Server(proxy, allowed_ips=socks_allowed_ips)
     await socks5.start("0.0.0.0", socks_port)
     log.info("SOCKS5 proxy on port %d", socks_port)
 
