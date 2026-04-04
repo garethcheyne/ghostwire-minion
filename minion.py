@@ -17,6 +17,7 @@ import os
 import platform
 import signal
 import socket
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -174,6 +175,44 @@ class ProxyHandler:
             "active_requests": self.active_requests,
         })
 
+    async def handle_destroy(self, request: web.Request) -> web.Response:
+        """Self-destruct: stop service, remove files, uninstall"""
+        if request.headers.get("X-Minion-API-Key", "") != self.api_key:
+            return web.json_response({"error": "Unauthorized"}, status=401)
+
+        log.warning("DESTROY command received — self-destructing")
+
+        # Respond before destroying
+        resp = web.json_response({"status": "destroying", "message": "Minion is removing itself"})
+        await resp.prepare(request)
+        await resp.write_eof()
+
+        # Schedule destruction after response is sent
+        asyncio.get_event_loop().call_later(1, lambda: asyncio.ensure_future(self._self_destruct()))
+        return resp
+
+    async def _self_destruct(self):
+        """Remove minion from the host OS"""
+        try:
+            cmds = [
+                ["systemctl", "stop", "ghostwire-minion"],
+                ["systemctl", "disable", "ghostwire-minion"],
+                ["rm", "-f", "/etc/systemd/system/ghostwire-minion.service"],
+                ["systemctl", "daemon-reload"],
+                ["rm", "-rf", "/opt/ghostwire-minion"],
+            ]
+            for cmd in cmds:
+                try:
+                    subprocess.run(cmd, timeout=10, capture_output=True)
+                except Exception as e:
+                    log.warning("Destroy step failed: %s — %s", cmd, e)
+
+            log.info("Self-destruct complete")
+        except Exception as e:
+            log.error("Self-destruct error: %s", e)
+        finally:
+            os._exit(0)
+
 
 # ---------------------------------------------------------------------------
 # Parent communication
@@ -288,6 +327,7 @@ async def run():
     app = web.Application()
     app.router.add_post("/proxy", proxy.handle_proxy)
     app.router.add_get("/health", proxy.handle_health)
+    app.router.add_post("/destroy", proxy.handle_destroy)
 
     runner = web.AppRunner(app)
     await runner.setup()
