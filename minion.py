@@ -11,6 +11,8 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import ipaddress
 import json
 import logging
 import os
@@ -21,6 +23,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 import aiohttp
 from aiohttp import web
@@ -46,6 +49,59 @@ def load_config() -> dict:
         sys.exit(1)
     with open(CONFIG_FILE) as f:
         return json.load(f)
+
+
+# ---------------------------------------------------------------------------
+# Security helpers
+# ---------------------------------------------------------------------------
+
+_BLOCKED_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "::1", "[::1]"}
+_BLOCKED_NETWORKS = [
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("169.254.0.0/16"),
+    ipaddress.ip_network("127.0.0.0/8"),
+    ipaddress.ip_network("fc00::/7"),
+    ipaddress.ip_network("fe80::/10"),
+]
+
+
+def _is_blocked_url(url: str) -> bool:
+    """Block requests to internal/private networks"""
+    try:
+        parsed = urlparse(url)
+        hostname = parsed.hostname
+        if not hostname:
+            return True
+        if hostname.lower() in _BLOCKED_HOSTS:
+            return True
+        try:
+            ip = ipaddress.ip_address(hostname)
+            for net in _BLOCKED_NETWORKS:
+                if ip in net:
+                    return True
+        except ValueError:
+            pass  # Domain name, not IP
+    except Exception:
+        return True
+    return False
+
+
+def _get_machine_id() -> str:
+    """Get a stable machine identifier"""
+    try:
+        # Try reading machine-id (Linux)
+        for path in ["/etc/machine-id", "/var/lib/dbus/machine-id"]:
+            try:
+                with open(path) as f:
+                    return hashlib.sha256(f.read().strip().encode()).hexdigest()[:32]
+            except FileNotFoundError:
+                continue
+        # Fallback: hostname + platform
+        return hashlib.sha256(f"{socket.gethostname()}-{platform.machine()}".encode()).hexdigest()[:32]
+    except Exception:
+        return "unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -91,11 +147,13 @@ async def get_ip_geo(ip: str) -> dict:
 # ---------------------------------------------------------------------------
 
 class ProxyHandler:
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, verify_ssl: bool = True):
         self.api_key = api_key
+        self.verify_ssl = verify_ssl
         self.request_count = 0
         self.bytes_transferred = 0
         self.active_requests = 0
+        self.max_concurrent = 50
         self._latencies: list[float] = []
         self._public_ip: str | None = None
 
@@ -110,6 +168,9 @@ class ProxyHandler:
         """Relay a request from the Ghostwire parent through this IP."""
         if request.headers.get("X-Minion-API-Key", "") != self.api_key:
             return web.json_response({"error": "Unauthorized"}, status=401)
+
+        if self.active_requests >= self.max_concurrent:
+            return web.json_response({"error": "Rate limit exceeded — too many concurrent requests"}, status=429)
 
         try:
             body = await request.json()
@@ -126,6 +187,9 @@ class ProxyHandler:
         if not url:
             return web.json_response({"error": "url is required"}, status=400)
 
+        if _is_blocked_url(url):
+            return web.json_response({"error": "Target URL is blocked (internal/private network)"}, status=403)
+
         self.active_requests += 1
         t0 = time.monotonic()
 
@@ -137,7 +201,7 @@ class ProxyHandler:
                     headers=headers,
                     data=req_body,
                     allow_redirects=follow,
-                    ssl=False,
+                    ssl=None if self.verify_ssl else False,
                 ) as resp:
                     resp_body = await resp.text()
                     resp_headers = dict(resp.headers)
@@ -146,6 +210,10 @@ class ProxyHandler:
                     self.request_count += 1
                     self.bytes_transferred += len(resp_body.encode())
                     self._latencies.append(elapsed)
+                    if len(self._latencies) > 1000:
+                        self._latencies = self._latencies[-500:]
+
+                    log.info("PROXY %s %s → %d (%.0fms, %d bytes)", method, url[:100], resp.status, elapsed, len(resp_body.encode()))
 
                     return web.json_response({
                         "status_code": resp.status,
@@ -155,11 +223,13 @@ class ProxyHandler:
                         "worker_ip": self._public_ip or "unknown",
                     })
         except asyncio.TimeoutError:
+            log.warning("PROXY %s %s → TIMEOUT (%.0fms)", method, url[:100], (time.monotonic() - t0) * 1000)
             return web.json_response(
                 {"error": "Request timed out", "elapsed_ms": round((time.monotonic() - t0) * 1000, 2)},
                 status=504,
             )
         except Exception as e:
+            log.error("PROXY %s %s → ERROR: %s (%.0fms)", method, url[:100], e, (time.monotonic() - t0) * 1000)
             return web.json_response(
                 {"error": str(e), "elapsed_ms": round((time.monotonic() - t0) * 1000, 2)},
                 status=502,
@@ -236,6 +306,7 @@ class ParentClient:
             "country": geo.get("country"),
             "city": geo.get("city"),
             "isp": geo.get("isp"),
+            "machine_id": _get_machine_id(),
         }
         try:
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as s:
@@ -287,6 +358,11 @@ async def heartbeat_loop(parent: ParentClient, proxy: ProxyHandler, port: int, i
         result = await parent.heartbeat(proxy, port)
         if result and not result.get("is_active", True):
             log.warning("Parent has disabled this minion")
+        if result:
+            # Check if parent indicates a newer version
+            latest = result.get("latest_agent_version")
+            if latest and latest != VERSION:
+                log.warning("New agent version available: %s (current: %s) — run install.sh to update", latest, VERSION)
 
 
 async def run():
@@ -299,7 +375,7 @@ async def run():
     log.info("Parent: %s", server_url)
     log.info("Proxy port: %s", proxy_port)
 
-    proxy = ProxyHandler(api_key)
+    proxy = ProxyHandler(api_key, verify_ssl=cfg.get("verify_ssl", True))
     parent = ParentClient(server_url, api_key)
 
     # Detect public IP once at startup
