@@ -338,79 +338,18 @@ install_files() {
     "$INSTALL_DIR/venv/bin/pip" install --quiet --upgrade pip
     "$INSTALL_DIR/venv/bin/pip" install --quiet -r "$INSTALL_DIR/requirements.txt"
 
-    # Resolve parent server IPs for SOCKS5 allowlist
-    PARENT_IPS="[]"
-    _resolve_host_ips() {
-        local host="$1"
-        local ips=""
-        # IPv4 first (getent ahostsv4 is most reliable)
-        ips=$(getent ahostsv4 "$host" 2>/dev/null | awk '{print $1}' | sort -u)
-        # Add IPv6
-        local ipv6
-        ipv6=$(getent ahostsv6 "$host" 2>/dev/null | awk '{print $1}' | sort -u)
-        if [[ -n "$ipv6" ]]; then
-            ips=$(printf "%s\n%s" "$ips" "$ipv6" | sort -u)
-        fi
-        # Fallback: dig for A + AAAA records
-        if [[ -z "$ips" ]] && command -v dig &>/dev/null; then
-            ips=$(dig +short A "$host" 2>/dev/null | grep -E '^[0-9]')
-            local ipv6_dig
-            ipv6_dig=$(dig +short AAAA "$host" 2>/dev/null | grep -E '^[0-9a-f:]+$')
-            if [[ -n "$ipv6_dig" ]]; then
-                ips=$(printf "%s\n%s" "$ips" "$ipv6_dig" | sort -u)
-            fi
-        fi
-        # Fallback: host command
-        if [[ -z "$ips" ]] && command -v host &>/dev/null; then
-            ips=$(host "$host" 2>/dev/null | awk '/has address/{print $NF}; /has IPv6 address/{print $NF}' | sort -u)
-        fi
-        echo "$ips" | grep -v '^$'
-    }
-
-    if [[ -n "$SERVER_URL" ]]; then
-        PARENT_HOST=$(echo "$SERVER_URL" | sed -E 's|^https?://||;s|[:/].*||')
-        if [[ -n "$PARENT_HOST" ]]; then
-            RESOLVED_IPS=$(_resolve_host_ips "$PARENT_HOST")
-            if [[ -n "$RESOLVED_IPS" ]]; then
-                PARENT_IPS=$(echo "$RESOLVED_IPS" | awk 'BEGIN{printf "["} NR>1{printf ","} {printf "\"%s\"",$1} END{printf "]"}')
-                info "Resolved parent IPs for SOCKS5 allowlist: $PARENT_IPS"
-            else
-                warn "Could not resolve parent host '$PARENT_HOST' — SOCKS5 will resolve at runtime"
-            fi
-        fi
-    elif [[ "$UPGRADE" == true && -f "$INSTALL_DIR/config.json" ]]; then
-        PARENT_HOST=$(python3 -c "import json; from urllib.parse import urlparse; print(urlparse(json.load(open('$INSTALL_DIR/config.json'))['server_url']).hostname)" 2>/dev/null)
-        if [[ -n "$PARENT_HOST" ]]; then
-            RESOLVED_IPS=$(_resolve_host_ips "$PARENT_HOST")
-            if [[ -n "$RESOLVED_IPS" ]]; then
-                PARENT_IPS=$(echo "$RESOLVED_IPS" | awk 'BEGIN{printf "["} NR>1{printf ","} {printf "\"%s\"",$1} END{printf "]"}')
-                info "Resolved parent IPs for SOCKS5 allowlist: $PARENT_IPS"
-            fi
-        fi
-    fi
-
-    # Write config (fresh install) or update socks_allowed_ips (upgrade)
+    # Write config on fresh install only
     if [[ "$UPGRADE" != true ]]; then
         cat > "$INSTALL_DIR/config.json" <<EOF
 {
     "server_url": "$SERVER_URL",
     "api_key": "$API_KEY",
-    "proxy_port": $PROXY_PORT,
-    "socks_allowed_ips": $PARENT_IPS
+    "proxy_port": $PROXY_PORT
 }
 EOF
         chmod 600 "$INSTALL_DIR/config.json"
-    else
-        # Update socks_allowed_ips in existing config
-        if [[ "$PARENT_IPS" != "[]" ]]; then
-            python3 -c "
-import json
-cfg = json.load(open('$INSTALL_DIR/config.json'))
-cfg['socks_allowed_ips'] = json.loads('$PARENT_IPS')
-json.dump(cfg, open('$INSTALL_DIR/config.json', 'w'), indent=4)
-" 2>/dev/null && info "Updated SOCKS5 allowlist in config" || true
-        fi
     fi
+    info "SOCKS5 allowlist managed by parent server (via registration + heartbeat)"
     info "Files installed"
 }
 

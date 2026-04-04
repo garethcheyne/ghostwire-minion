@@ -631,21 +631,9 @@ async def run():
     proxy.socks_port = socks_port
     parent = ParentClient(server_url, api_key)
 
-    # Resolve parent server IP(s) for SOCKS5 allowlist
-    socks_allowed_ips = set()
-    try:
-        from urllib.parse import urlparse as _urlparse
-        parent_host = _urlparse(server_url).hostname
-        if parent_host:
-            parent_ips = socket.getaddrinfo(parent_host, None)
-            for info in parent_ips:
-                socks_allowed_ips.add(info[4][0])
-            # Also allow any extra IPs from config
-            for ip in cfg.get("socks_allowed_ips", []):
-                socks_allowed_ips.add(ip)
-            log.info("SOCKS5 allowlist: %s", socks_allowed_ips)
-    except Exception as e:
-        log.warning("Could not resolve parent IP for SOCKS5 allowlist: %s", e)
+    # SOCKS5 allowlist — populated by parent via registration + heartbeat responses
+    # and auto-learned from authenticated API requests
+    socks_allowed_ips: set[str] = set()
 
     # Detect public IP once at startup
     proxy._public_ip = await get_public_ip()
