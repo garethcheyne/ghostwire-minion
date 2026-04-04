@@ -6,7 +6,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/garethcheyne/ghostwire-minion/main/install.sh | sudo bash
 # =============================================================================
 
-set -e
+# set -e removed — we handle errors explicitly via error() function
 
 INSTALL_DIR="/opt/ghostwire-minion"
 SERVICE_NAME="ghostwire-minion"
@@ -97,7 +97,9 @@ configure() {
 
     ask "Correct? [Y/n] "
     read -r OK
-    [[ "$OK" =~ ^[Nn] ]] && error "Cancelled"
+    if [[ "$OK" =~ ^[Nn] ]]; then
+        error "Cancelled"
+    fi
 }
 
 # ---------------------------------------------------------------------------
