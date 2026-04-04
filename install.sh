@@ -250,18 +250,36 @@ install_files() {
     info "Installing to $INSTALL_DIR ..."
     mkdir -p "$INSTALL_DIR"
 
+    # Stop service before overwriting files (if upgrading)
+    if [[ "$UPGRADE" == true ]]; then
+        info "Stopping service for upgrade..."
+        if [[ "$INIT_SYSTEM" == "systemd" ]]; then
+            systemctl stop "$SERVICE_NAME" 2>/dev/null || true
+        elif [[ "$INIT_SYSTEM" == "openrc" ]]; then
+            rc-service "$SERVICE_NAME" stop 2>/dev/null || true
+        fi
+    fi
+
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
     if [[ -f "$SCRIPT_DIR/minion.py" ]]; then
         cp "$SCRIPT_DIR/minion.py"        "$INSTALL_DIR/"
         cp "$SCRIPT_DIR/requirements.txt" "$INSTALL_DIR/"
     else
+        # Clean up any stale clone from previous run
+        rm -rf /tmp/gw-minion-tmp
         ensure_cmd git
         git clone --depth 1 "$REPO_URL" /tmp/gw-minion-tmp
         cp /tmp/gw-minion-tmp/minion.py        "$INSTALL_DIR/"
         cp /tmp/gw-minion-tmp/requirements.txt "$INSTALL_DIR/"
         rm -rf /tmp/gw-minion-tmp
     fi
+
+    # Flush old bytecode cache so Python picks up the new code
+    find "$INSTALL_DIR" -name "*.pyc" -delete 2>/dev/null || true
+    find "$INSTALL_DIR" -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
+
+    info "Installed minion.py version: $(grep '^VERSION' "$INSTALL_DIR/minion.py" | head -1)"
 
     info "Creating venv..."
     # Ensure the venv module is available (may need version-specific package on Debian/Ubuntu)
@@ -271,6 +289,13 @@ install_files() {
         pkg_update
         pkg_install "python${PY_VER}-venv" || pkg_install python3-venv || true
     fi
+
+    # On upgrade, remove old venv and recreate to avoid stale state
+    if [[ "$UPGRADE" == true ]] && [[ -d "$INSTALL_DIR/venv" ]]; then
+        info "Rebuilding venv for clean upgrade..."
+        rm -rf "$INSTALL_DIR/venv"
+    fi
+
     python3 -m venv "$INSTALL_DIR/venv" || {
         # Some minimal distros need ensurepip — try without pip then bootstrap
         warn "venv creation failed — trying without pip..."
