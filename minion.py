@@ -198,6 +198,14 @@ class ProxyHandler:
         timeout = body.get("timeout", 30)
         follow = body.get("follow_redirects", True)
 
+        # Remove brotli from Accept-Encoding — aiohttp doesn't support it
+        # and servers will return br-compressed content we can't decompress
+        if "Accept-Encoding" in headers:
+            ae = headers["Accept-Encoding"]
+            headers["Accept-Encoding"] = ", ".join(
+                p.strip() for p in ae.split(",") if p.strip().lower() != "br"
+            )
+
         if not url:
             return web.json_response({"error": "url is required"}, status=400)
 
