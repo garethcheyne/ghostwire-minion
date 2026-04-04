@@ -334,16 +334,58 @@ install_files() {
     "$INSTALL_DIR/venv/bin/pip" install --quiet --upgrade pip
     "$INSTALL_DIR/venv/bin/pip" install --quiet -r "$INSTALL_DIR/requirements.txt"
 
-    # Only write config on fresh install
+    # Resolve parent server IPs for SOCKS5 allowlist
+    PARENT_IPS="[]"
+    if [[ -n "$SERVER_URL" ]]; then
+        PARENT_HOST=$(echo "$SERVER_URL" | sed -E 's|^https?://||;s|[:/].*||')
+        if [[ -n "$PARENT_HOST" ]]; then
+            # Resolve all IPs (IPv4 + IPv6)
+            RESOLVED_IPS=$(getent hosts "$PARENT_HOST" 2>/dev/null | awk '{print $1}' | sort -u)
+            if [[ -z "$RESOLVED_IPS" ]]; then
+                # Fallback: use dig or host
+                RESOLVED_IPS=$(dig +short "$PARENT_HOST" 2>/dev/null | grep -E '^[0-9]' | sort -u)
+            fi
+            if [[ -n "$RESOLVED_IPS" ]]; then
+                # Format as JSON array
+                PARENT_IPS=$(echo "$RESOLVED_IPS" | awk 'BEGIN{printf "["} NR>1{printf ","} {printf "\"%s\"",$1} END{printf "]"}')
+                info "Resolved parent IPs for SOCKS5 allowlist: $PARENT_IPS"
+            else
+                warn "Could not resolve parent host '$PARENT_HOST' — SOCKS5 will resolve at runtime"
+            fi
+        fi
+    elif [[ "$UPGRADE" == true && -f "$INSTALL_DIR/config.json" ]]; then
+        # On upgrade, resolve from existing config
+        PARENT_HOST=$(python3 -c "import json; from urllib.parse import urlparse; print(urlparse(json.load(open('$INSTALL_DIR/config.json'))['server_url']).hostname)" 2>/dev/null)
+        if [[ -n "$PARENT_HOST" ]]; then
+            RESOLVED_IPS=$(getent hosts "$PARENT_HOST" 2>/dev/null | awk '{print $1}' | sort -u)
+            if [[ -n "$RESOLVED_IPS" ]]; then
+                PARENT_IPS=$(echo "$RESOLVED_IPS" | awk 'BEGIN{printf "["} NR>1{printf ","} {printf "\"%s\"",$1} END{printf "]"}')
+                info "Resolved parent IPs for SOCKS5 allowlist: $PARENT_IPS"
+            fi
+        fi
+    fi
+
+    # Write config (fresh install) or update socks_allowed_ips (upgrade)
     if [[ "$UPGRADE" != true ]]; then
         cat > "$INSTALL_DIR/config.json" <<EOF
 {
     "server_url": "$SERVER_URL",
     "api_key": "$API_KEY",
-    "proxy_port": $PROXY_PORT
+    "proxy_port": $PROXY_PORT,
+    "socks_allowed_ips": $PARENT_IPS
 }
 EOF
         chmod 600 "$INSTALL_DIR/config.json"
+    else
+        # Update socks_allowed_ips in existing config
+        if [[ "$PARENT_IPS" != "[]" ]]; then
+            python3 -c "
+import json
+cfg = json.load(open('$INSTALL_DIR/config.json'))
+cfg['socks_allowed_ips'] = json.loads('$PARENT_IPS')
+json.dump(cfg, open('$INSTALL_DIR/config.json', 'w'), indent=4)
+" 2>/dev/null && info "Updated SOCKS5 allowlist in config" || true
+        fi
     fi
     info "Files installed"
 }
