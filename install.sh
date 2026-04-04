@@ -57,7 +57,7 @@ banner() {
     echo -e "${CYAN}"
     echo "  ╔══════════════════════════════════════════╗"
     echo "  ║        Ghostwire Minion Installer        ║"
-    echo "  ║          v2026.04.05.1200                ║"
+    echo "  ║          v2026.04.05.1300                ║"
     echo "  ╚══════════════════════════════════════════╝"
     echo -e "${NC}"
 }
@@ -125,6 +125,13 @@ check_python() {
     if command -v python3 &>/dev/null; then
         if python3 -c "import sys; exit(0 if sys.version_info >= (3, 10) else 1)" 2>/dev/null; then
             info "Python $(python3 --version 2>&1 | awk '{print $2}') found"
+            # Ensure venv module is available (Debian/Ubuntu need version-specific package)
+            if ! python3 -c "import venv" 2>/dev/null && [[ "$PKG_MANAGER" == "apt" ]]; then
+                PY_VER=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+                warn "python3-venv not available — installing python${PY_VER}-venv..."
+                pkg_update
+                pkg_install "python${PY_VER}-venv" || pkg_install python3-venv || true
+            fi
             return
         fi
     fi
