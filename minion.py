@@ -166,10 +166,22 @@ class ProxyHandler:
         recent = self._latencies[-100:]
         return sum(recent) / len(recent)
 
+    def _learn_parent_ip(self, request: web.Request):
+        """Auto-allowlist the source IP of authenticated API requests for SOCKS5."""
+        peername = request.transport.get_extra_info("peername") if request.transport else None
+        if peername:
+            caller_ip = peername[0]
+            allowed = getattr(self, '_socks_allowed_ips', None)
+            if allowed is not None and caller_ip not in allowed:
+                allowed.add(caller_ip)
+                log.info("SOCKS5 auto-allowlisted parent IP: %s", caller_ip)
+
     async def handle_proxy(self, request: web.Request) -> web.Response:
         """Relay a request from the Ghostwire parent through this IP."""
         if request.headers.get("X-Minion-API-Key", "") != self.api_key:
             return web.json_response({"error": "Unauthorized"}, status=401)
+
+        self._learn_parent_ip(request)
 
         if self.active_requests >= self.max_concurrent:
             return web.json_response({"error": "Rate limit exceeded — too many concurrent requests"}, status=429)
@@ -253,6 +265,7 @@ class ProxyHandler:
         """Self-destruct: stop service, remove files, uninstall"""
         if request.headers.get("X-Minion-API-Key", "") != self.api_key:
             return web.json_response({"error": "Unauthorized"}, status=401)
+        self._learn_parent_ip(request)
 
         log.warning("DESTROY command received — self-destructing")
 
@@ -269,6 +282,7 @@ class ProxyHandler:
         """Pull latest code from Git, reinstall deps, restart the service."""
         if request.headers.get("X-Minion-API-Key", "") != self.api_key:
             return web.json_response({"error": "Unauthorized"}, status=401)
+        self._learn_parent_ip(request)
 
         log.info("UPGRADE command received — starting upgrade")
 
