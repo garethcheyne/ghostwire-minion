@@ -54,14 +54,18 @@ error() { echo -e "${RED}[✗]${NC} $1"; exit 1; }
 ask()   { echo -ne "${CYAN}[?]${NC} $1"; }
 
 banner() {
-    # Read version from VERSION file (local clone or installed copy)
+    # Read version from VERSION file (local clone, installed copy, or GitHub)
     local ver="unknown"
     local script_dir
     script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
-    if [[ -f "$script_dir/VERSION" ]]; then
+    if [[ -n "$script_dir" && -f "$script_dir/VERSION" ]]; then
         ver=$(cat "$script_dir/VERSION" | tr -d '[:space:]')
     elif [[ -f "$INSTALL_DIR/VERSION" ]]; then
         ver=$(cat "$INSTALL_DIR/VERSION" | tr -d '[:space:]')
+    else
+        # Piped via curl — fetch version from GitHub
+        ver=$(curl -fsSL "https://raw.githubusercontent.com/garethcheyne/ghostwire-minion/main/VERSION" 2>/dev/null | tr -d '[:space:]')
+        [[ -z "$ver" ]] && ver="unknown"
     fi
     echo -e "${CYAN}"
     printf "  ╔══════════════════════════════════════════╗\n"
@@ -336,17 +340,38 @@ install_files() {
 
     # Resolve parent server IPs for SOCKS5 allowlist
     PARENT_IPS="[]"
+    _resolve_host_ips() {
+        local host="$1"
+        local ips=""
+        # IPv4 first (getent ahostsv4 is most reliable)
+        ips=$(getent ahostsv4 "$host" 2>/dev/null | awk '{print $1}' | sort -u)
+        # Add IPv6
+        local ipv6
+        ipv6=$(getent ahostsv6 "$host" 2>/dev/null | awk '{print $1}' | sort -u)
+        if [[ -n "$ipv6" ]]; then
+            ips=$(printf "%s\n%s" "$ips" "$ipv6" | sort -u)
+        fi
+        # Fallback: dig for A + AAAA records
+        if [[ -z "$ips" ]] && command -v dig &>/dev/null; then
+            ips=$(dig +short A "$host" 2>/dev/null | grep -E '^[0-9]')
+            local ipv6_dig
+            ipv6_dig=$(dig +short AAAA "$host" 2>/dev/null | grep -E '^[0-9a-f:]+$')
+            if [[ -n "$ipv6_dig" ]]; then
+                ips=$(printf "%s\n%s" "$ips" "$ipv6_dig" | sort -u)
+            fi
+        fi
+        # Fallback: host command
+        if [[ -z "$ips" ]] && command -v host &>/dev/null; then
+            ips=$(host "$host" 2>/dev/null | awk '/has address/{print $NF}; /has IPv6 address/{print $NF}' | sort -u)
+        fi
+        echo "$ips" | grep -v '^$'
+    }
+
     if [[ -n "$SERVER_URL" ]]; then
         PARENT_HOST=$(echo "$SERVER_URL" | sed -E 's|^https?://||;s|[:/].*||')
         if [[ -n "$PARENT_HOST" ]]; then
-            # Resolve all IPs (IPv4 + IPv6)
-            RESOLVED_IPS=$(getent hosts "$PARENT_HOST" 2>/dev/null | awk '{print $1}' | sort -u)
-            if [[ -z "$RESOLVED_IPS" ]]; then
-                # Fallback: use dig or host
-                RESOLVED_IPS=$(dig +short "$PARENT_HOST" 2>/dev/null | grep -E '^[0-9]' | sort -u)
-            fi
+            RESOLVED_IPS=$(_resolve_host_ips "$PARENT_HOST")
             if [[ -n "$RESOLVED_IPS" ]]; then
-                # Format as JSON array
                 PARENT_IPS=$(echo "$RESOLVED_IPS" | awk 'BEGIN{printf "["} NR>1{printf ","} {printf "\"%s\"",$1} END{printf "]"}')
                 info "Resolved parent IPs for SOCKS5 allowlist: $PARENT_IPS"
             else
@@ -354,10 +379,9 @@ install_files() {
             fi
         fi
     elif [[ "$UPGRADE" == true && -f "$INSTALL_DIR/config.json" ]]; then
-        # On upgrade, resolve from existing config
         PARENT_HOST=$(python3 -c "import json; from urllib.parse import urlparse; print(urlparse(json.load(open('$INSTALL_DIR/config.json'))['server_url']).hostname)" 2>/dev/null)
         if [[ -n "$PARENT_HOST" ]]; then
-            RESOLVED_IPS=$(getent hosts "$PARENT_HOST" 2>/dev/null | awk '{print $1}' | sort -u)
+            RESOLVED_IPS=$(_resolve_host_ips "$PARENT_HOST")
             if [[ -n "$RESOLVED_IPS" ]]; then
                 PARENT_IPS=$(echo "$RESOLVED_IPS" | awk 'BEGIN{printf "["} NR>1{printf ","} {printf "\"%s\"",$1} END{printf "]"}')
                 info "Resolved parent IPs for SOCKS5 allowlist: $PARENT_IPS"
