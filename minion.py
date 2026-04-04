@@ -586,7 +586,7 @@ async def heartbeat_loop(parent: ParentClient, proxy: ProxyHandler, port: int, i
         if result:
             # Check if parent indicates a newer version
             latest = result.get("latest_agent_version")
-            if latest and latest != VERSION:
+            if latest and latest > VERSION:
                 log.warning("New agent version available: %s (current: %s)", latest, VERSION)
                 # Auto-upgrade if parent requests it
                 if result.get("upgrade_requested"):
