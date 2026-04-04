@@ -8,6 +8,7 @@ through this machine's IP address. That's it.
 Usage:
     python minion.py          (reads config.json in same directory)
 """
+from __future__ import annotations
 
 import asyncio
 import json

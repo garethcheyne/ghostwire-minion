@@ -63,10 +63,29 @@ ensure_cmd() {
 }
 
 # ---------------------------------------------------------------------------
+# Upgrade detection
+# ---------------------------------------------------------------------------
+
+UPGRADE=false
+
+detect_existing() {
+    if [[ -f "$INSTALL_DIR/config.json" ]] && [[ -f "$INSTALL_DIR/minion.py" ]]; then
+        UPGRADE=true
+        info "Existing installation detected — upgrading code only"
+        info "Config preserved: $INSTALL_DIR/config.json"
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # Setup questions
 # ---------------------------------------------------------------------------
 
 configure() {
+    if [[ "$UPGRADE" == true ]]; then
+        # Read existing config for port (needed by firewall/service)
+        PROXY_PORT=$(python3 -c "import json; print(json.load(open('$INSTALL_DIR/config.json')).get('proxy_port', 1080))" 2>/dev/null || echo 1080)
+        return
+    fi
     echo ""
     echo -e "${CYAN}── Setup ──────────────────────────────────────────${NC}"
     echo ""
@@ -128,14 +147,17 @@ install_files() {
     "$INSTALL_DIR/venv/bin/pip" install --quiet --upgrade pip
     "$INSTALL_DIR/venv/bin/pip" install --quiet -r "$INSTALL_DIR/requirements.txt"
 
-    cat > "$INSTALL_DIR/config.json" <<EOF
+    # Only write config on fresh install
+    if [[ "$UPGRADE" != true ]]; then
+        cat > "$INSTALL_DIR/config.json" <<EOF
 {
     "server_url": "$SERVER_URL",
     "api_key": "$API_KEY",
     "proxy_port": $PROXY_PORT
 }
 EOF
-    chmod 600 "$INSTALL_DIR/config.json"
+        chmod 600 "$INSTALL_DIR/config.json"
+    fi
     info "Files installed"
 }
 
@@ -241,6 +263,7 @@ banner
 check_root
 check_python
 ensure_cmd curl
+detect_existing
 configure
 install_files
 open_firewall
