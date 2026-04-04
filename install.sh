@@ -2,11 +2,44 @@
 # =============================================================================
 # Ghostwire Minion — Installer
 #
-# Quick install:
+# Supports: Alpine (OpenRC), Debian/Ubuntu, RHEL/Fedora, Arch (systemd)
+#
+# Quick install (interactive):
 #   curl -fsSL https://raw.githubusercontent.com/garethcheyne/ghostwire-minion/main/install.sh | sudo bash
+#
+# Non-interactive:
+#   curl -fsSL ... | sudo bash -s -- --parent https://ghostwire.err403.com --key gw-node-xxxx
+#   sudo ./install.sh --parent https://ghostwire.err403.com --key gw-node-xxxx [--port 1080]
 # =============================================================================
 
-# set -e removed — we handle errors explicitly via error() function
+# ---------------------------------------------------------------------------
+# Parse CLI arguments
+# ---------------------------------------------------------------------------
+
+ARG_PARENT=""
+ARG_KEY=""
+ARG_PORT=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --parent|-p)  ARG_PARENT="$2"; shift 2 ;;
+        --key|-k)     ARG_KEY="$2";    shift 2 ;;
+        --port)       ARG_PORT="$2";   shift 2 ;;
+        --help|-h)
+            echo "Usage: install.sh [--parent URL] [--key API_KEY] [--port PORT]"
+            echo ""
+            echo "Options:"
+            echo "  --parent, -p   Ghostwire server URL (e.g. https://ghostwire.err403.com)"
+            echo "  --key, -k      Minion API key (starts with gw-node-)"
+            echo "  --port         Proxy listen port (default: 1080)"
+            echo "  --help, -h     Show this help"
+            echo ""
+            echo "If --parent and --key are provided, runs non-interactively."
+            exit 0
+            ;;
+        *) echo "Unknown option: $1"; exit 1 ;;
+    esac
+done
 
 INSTALL_DIR="/opt/ghostwire-minion"
 SERVICE_NAME="ghostwire-minion"
@@ -30,6 +63,57 @@ banner() {
 }
 
 # ---------------------------------------------------------------------------
+# Detect init system and package manager
+# ---------------------------------------------------------------------------
+
+INIT_SYSTEM=""
+PKG_MANAGER=""
+
+detect_system() {
+    # Detect package manager
+    if   command -v apk     &>/dev/null; then PKG_MANAGER="apk"
+    elif command -v apt-get &>/dev/null; then PKG_MANAGER="apt"
+    elif command -v dnf     &>/dev/null; then PKG_MANAGER="dnf"
+    elif command -v yum     &>/dev/null; then PKG_MANAGER="yum"
+    elif command -v pacman  &>/dev/null; then PKG_MANAGER="pacman"
+    else error "No supported package manager found (apk, apt, dnf, yum, pacman)"; fi
+
+    # Detect init system
+    if command -v systemctl &>/dev/null && systemctl --version &>/dev/null 2>&1; then
+        INIT_SYSTEM="systemd"
+    elif command -v rc-service &>/dev/null; then
+        INIT_SYSTEM="openrc"
+    else
+        error "No supported init system found (systemd or OpenRC)"
+    fi
+
+    info "Detected: $PKG_MANAGER + $INIT_SYSTEM"
+}
+
+# ---------------------------------------------------------------------------
+# Package install helper
+# ---------------------------------------------------------------------------
+
+pkg_install() {
+    local pkgs=("$@")
+    case "$PKG_MANAGER" in
+        apk)    apk add --quiet "${pkgs[@]}" ;;
+        apt)    apt-get install -y -qq "${pkgs[@]}" ;;
+        dnf)    dnf install -y -q "${pkgs[@]}" ;;
+        yum)    yum install -y -q "${pkgs[@]}" ;;
+        pacman) pacman -Sy --noconfirm "${pkgs[@]}" ;;
+    esac
+}
+
+pkg_update() {
+    case "$PKG_MANAGER" in
+        apk) apk update --quiet ;;
+        apt) apt-get update -qq ;;
+        *)   ;; # dnf/yum/pacman update index on install
+    esac
+}
+
+# ---------------------------------------------------------------------------
 # Pre-flight
 # ---------------------------------------------------------------------------
 
@@ -45,21 +129,40 @@ check_python() {
         fi
     fi
     warn "Python >= 3.10 not found — installing..."
-    if   command -v apt-get &>/dev/null; then apt-get update -qq && apt-get install -y -qq python3 python3-venv python3-pip
-    elif command -v dnf     &>/dev/null; then dnf install -y -q python3 python3-pip
-    elif command -v yum     &>/dev/null; then yum install -y -q python3 python3-pip
-    elif command -v pacman  &>/dev/null; then pacman -Sy --noconfirm python python-pip
-    else error "Install Python >= 3.10 manually"; fi
+    pkg_update
+    case "$PKG_MANAGER" in
+        apk)    pkg_install python3 py3-pip ;;
+        apt)    pkg_install python3 python3-venv python3-pip ;;
+        dnf)    pkg_install python3 python3-pip ;;
+        yum)    pkg_install python3 python3-pip ;;
+        pacman) pkg_install python python-pip ;;
+    esac
+    command -v python3 &>/dev/null || error "Failed to install Python — install Python >= 3.10 manually"
     info "Python installed"
 }
 
 ensure_cmd() {
     command -v "$1" &>/dev/null && return
     warn "$1 not found — installing..."
-    if   command -v apt-get &>/dev/null; then apt-get install -y -qq "$1"
-    elif command -v dnf     &>/dev/null; then dnf install -y -q "$1"
-    elif command -v yum     &>/dev/null; then yum install -y -q "$1"
-    fi
+    # Map command names to package names per distro
+    local pkg="$1"
+    case "$PKG_MANAGER" in
+        apk)
+            # Alpine package names sometimes differ
+            case "$1" in
+                git)  pkg="git" ;;
+                curl) pkg="curl" ;;
+            esac
+            ;;
+        pacman)
+            case "$1" in
+                git)  pkg="git" ;;
+                curl) pkg="curl" ;;
+            esac
+            ;;
+    esac
+    pkg_install "$pkg"
+    command -v "$1" &>/dev/null || error "Failed to install $1"
 }
 
 # ---------------------------------------------------------------------------
@@ -82,10 +185,27 @@ detect_existing() {
 
 configure() {
     if [[ "$UPGRADE" == true ]]; then
-        # Read existing config for port (needed by firewall/service)
         PROXY_PORT=$(python3 -c "import json; print(json.load(open('$INSTALL_DIR/config.json')).get('proxy_port', 1080))" 2>/dev/null || echo 1080)
         return
     fi
+
+    # Non-interactive mode: use CLI args
+    if [[ -n "$ARG_PARENT" && -n "$ARG_KEY" ]]; then
+        SERVER_URL="${ARG_PARENT%/}"
+        API_KEY="$ARG_KEY"
+        PROXY_PORT="${ARG_PORT:-1080}"
+
+        [[ "$SERVER_URL" =~ ^https?:// ]] || error "URL must start with http:// or https://"
+        [[ "$API_KEY" =~ ^gw-node- ]] || error "Key must start with 'gw-node-' — get it from Ghostwire → Worker Nodes"
+
+        info "Non-interactive mode"
+        info "Parent:  $SERVER_URL"
+        info "API key: ${API_KEY:0:20}..."
+        info "Port:    $PROXY_PORT"
+        return
+    fi
+
+    # Interactive mode
     echo ""
     echo -e "${CYAN}── Setup ──────────────────────────────────────────${NC}"
     echo ""
@@ -143,7 +263,12 @@ install_files() {
     fi
 
     info "Creating venv..."
-    python3 -m venv "$INSTALL_DIR/venv"
+    python3 -m venv "$INSTALL_DIR/venv" || {
+        # Some minimal distros need ensurepip — try without pip then bootstrap
+        warn "venv creation failed — trying without pip..."
+        python3 -m venv --without-pip "$INSTALL_DIR/venv"
+        curl -fsSL https://bootstrap.pypa.io/get-pip.py | "$INSTALL_DIR/venv/bin/python"
+    }
     "$INSTALL_DIR/venv/bin/pip" install --quiet --upgrade pip
     "$INSTALL_DIR/venv/bin/pip" install --quiet -r "$INSTALL_DIR/requirements.txt"
 
@@ -160,6 +285,10 @@ EOF
     fi
     info "Files installed"
 }
+
+# ---------------------------------------------------------------------------
+# Firewall
+# ---------------------------------------------------------------------------
 
 open_firewall() {
     if command -v ufw &>/dev/null; then
@@ -189,7 +318,11 @@ open_firewall() {
     fi
 }
 
-install_service() {
+# ---------------------------------------------------------------------------
+# Service — systemd
+# ---------------------------------------------------------------------------
+
+install_service_systemd() {
     info "Creating systemd service..."
 
     cat > "/etc/systemd/system/${SERVICE_NAME}.service" <<EOF
@@ -218,7 +351,53 @@ EOF
     systemctl daemon-reload
     systemctl enable "$SERVICE_NAME"
     systemctl start  "$SERVICE_NAME"
-    info "Service started & enabled on boot"
+    info "systemd service started & enabled on boot"
+}
+
+# ---------------------------------------------------------------------------
+# Service — OpenRC (Alpine)
+# ---------------------------------------------------------------------------
+
+install_service_openrc() {
+    info "Creating OpenRC service..."
+
+    cat > "/etc/init.d/${SERVICE_NAME}" <<'INITEOF'
+#!/sbin/openrc-run
+
+name="Ghostwire Minion"
+description="Ghostwire Minion proxy agent"
+
+INSTALL_DIR="/opt/ghostwire-minion"
+
+command="$INSTALL_DIR/venv/bin/python"
+command_args="$INSTALL_DIR/minion.py"
+command_background=true
+pidfile="/run/${RC_SVCNAME}.pid"
+output_log="/var/log/${RC_SVCNAME}.log"
+error_log="/var/log/${RC_SVCNAME}.log"
+directory="$INSTALL_DIR"
+
+depend() {
+    need net
+    after firewall
+}
+
+start_pre() {
+    checkpath --file --owner root:root --mode 0644 "$output_log"
+}
+INITEOF
+
+    chmod +x "/etc/init.d/${SERVICE_NAME}"
+    rc-update add "$SERVICE_NAME" default
+    rc-service "$SERVICE_NAME" start
+    info "OpenRC service started & enabled on boot"
+}
+
+install_service() {
+    case "$INIT_SYSTEM" in
+        systemd) install_service_systemd ;;
+        openrc)  install_service_openrc ;;
+    esac
 }
 
 # ---------------------------------------------------------------------------
@@ -228,11 +407,23 @@ EOF
 verify() {
     echo ""
     sleep 3
-    if systemctl is-active --quiet "$SERVICE_NAME"; then
-        info "Service is running"
-    else
-        warn "Still starting — check: journalctl -u $SERVICE_NAME -f"
-    fi
+
+    case "$INIT_SYSTEM" in
+        systemd)
+            if systemctl is-active --quiet "$SERVICE_NAME"; then
+                info "Service is running"
+            else
+                warn "Still starting — check: journalctl -u $SERVICE_NAME -f"
+            fi
+            ;;
+        openrc)
+            if rc-service "$SERVICE_NAME" status 2>/dev/null | grep -q "started"; then
+                info "Service is running"
+            else
+                warn "Still starting — check: tail -f /var/log/${SERVICE_NAME}.log"
+            fi
+            ;;
+    esac
 
     if curl -sf "http://localhost:${PROXY_PORT}/health" >/dev/null 2>&1; then
         info "Health check OK on port $PROXY_PORT"
@@ -245,9 +436,20 @@ verify() {
     echo -e "${GREEN}  Minion installed!${NC}"
     echo -e "${GREEN}══════════════════════════════════════════════════${NC}"
     echo ""
-    echo "  Status:   sudo systemctl status $SERVICE_NAME"
-    echo "  Logs:     sudo journalctl -u $SERVICE_NAME -f"
-    echo "  Restart:  sudo systemctl restart $SERVICE_NAME"
+
+    case "$INIT_SYSTEM" in
+        systemd)
+            echo "  Status:   sudo systemctl status $SERVICE_NAME"
+            echo "  Logs:     sudo journalctl -u $SERVICE_NAME -f"
+            echo "  Restart:  sudo systemctl restart $SERVICE_NAME"
+            ;;
+        openrc)
+            echo "  Status:   sudo rc-service $SERVICE_NAME status"
+            echo "  Logs:     sudo tail -f /var/log/${SERVICE_NAME}.log"
+            echo "  Restart:  sudo rc-service $SERVICE_NAME restart"
+            ;;
+    esac
+
     echo "  Config:   sudo cat $INSTALL_DIR/config.json"
     echo ""
     echo "  This minion should now appear in your Ghostwire"
@@ -261,6 +463,7 @@ verify() {
 
 banner
 check_root
+detect_system
 check_python
 ensure_cmd curl
 detect_existing
