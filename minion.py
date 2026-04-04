@@ -598,6 +598,13 @@ async def heartbeat_loop(parent: ParentClient, proxy: ProxyHandler, port: int, i
         if result and not result.get("is_active", True):
             log.warning("Parent has disabled this minion")
         if result:
+            # Add server IPs to SOCKS5 allowlist
+            for ip in result.get("server_ips", []):
+                allowed = getattr(proxy, '_socks_allowed_ips', None)
+                if allowed is not None and ip not in allowed:
+                    allowed.add(ip)
+                    log.info("SOCKS5 allowlisted server IP from heartbeat: %s", ip)
+
             # Check if parent indicates a newer version
             latest = result.get("latest_agent_version")
             if latest and latest > VERSION:
@@ -660,6 +667,12 @@ async def run():
         sys.exit(1)
 
     hb_interval = reg.get("heartbeat_interval_seconds", 30)
+
+    # Add server IPs from registration to SOCKS5 allowlist
+    for ip in reg.get("server_ips", []):
+        if ip not in socks_allowed_ips:
+            socks_allowed_ips.add(ip)
+            log.info("SOCKS5 allowlisted server IP from registration: %s", ip)
 
     # Start HTTP server
     app = web.Application()
