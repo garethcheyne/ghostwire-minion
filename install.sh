@@ -137,6 +137,34 @@ EOF
     info "Files installed"
 }
 
+open_firewall() {
+    if command -v ufw &>/dev/null; then
+        if ufw status | grep -q "Status: active"; then
+            info "Opening port $PROXY_PORT in UFW..."
+            ufw allow "$PROXY_PORT"/tcp comment "Ghostwire Minion" >/dev/null 2>&1
+            info "UFW: port $PROXY_PORT/tcp allowed"
+        else
+            warn "UFW installed but inactive — skipping firewall rule"
+        fi
+    elif command -v firewall-cmd &>/dev/null; then
+        if systemctl is-active --quiet firewalld; then
+            info "Opening port $PROXY_PORT in firewalld..."
+            firewall-cmd --permanent --add-port="$PROXY_PORT"/tcp >/dev/null 2>&1
+            firewall-cmd --reload >/dev/null 2>&1
+            info "firewalld: port $PROXY_PORT/tcp allowed"
+        else
+            warn "firewalld installed but inactive — skipping firewall rule"
+        fi
+    elif command -v iptables &>/dev/null; then
+        info "Adding iptables rule for port $PROXY_PORT..."
+        iptables -C INPUT -p tcp --dport "$PROXY_PORT" -j ACCEPT 2>/dev/null \
+            || iptables -A INPUT -p tcp --dport "$PROXY_PORT" -j ACCEPT
+        info "iptables: port $PROXY_PORT/tcp allowed"
+    else
+        warn "No firewall detected — make sure port $PROXY_PORT is accessible"
+    fi
+}
+
 install_service() {
     info "Creating systemd service..."
 
@@ -213,5 +241,6 @@ check_python
 ensure_cmd curl
 configure
 install_files
+open_firewall
 install_service
 verify
