@@ -87,6 +87,22 @@ Last updated: 2026-04-05
 
 ---
 
+## Phase 7 — Host watch mode
+**Status:** PLANNED (added 2026-10-28, after the AKG Tech incident)
+
+A compromised Next.js container ran an XMRig miner, a backdoor root user, cron persistence and a worm for five months on a host with nothing watching inside it. The minion is already installed on servers and reporting heartbeats, so a read-only watch mode would have caught every stage. Report: `Desktop\AKGTech-Security-Incident-Report-2026-10-28.html`.
+
+- [ ] Optional `watch` mode (off by default, `--watch` in `install.sh`), reporting to the parent with each heartbeat or on a 5-minute timer. Read-only: it never changes the host.
+- [ ] **Docker**: per-container CPU and memory (`docker stats`), image, creation time and age, published ports (flag `0.0.0.0`), privileged/root user, and mounts of the Docker socket or host paths. Needs read access to `/var/run/docker.sock`; document the risk.
+- [ ] **Processes** (host and each container through `docker top`): flag executables running from `/tmp`, `/var/tmp` or `/dev/shm`; known miner names and arguments (`xmrig`, `-o host:port -u … -p …`, `stratum+tcp`); unexpected children of web runtimes (anything except `node` under `next-server`).
+- [ ] **Persistence**: hash `/etc/passwd` (flag new UID-0 users), crontabs, `/etc/sudoers.d`, systemd units, and `authorized_keys`, on the host and in containers. Report changes.
+- [ ] **Network**: outbound connections (`ss -tnp` / `/proc/net/tcp`) to mining ports (3333, 4444, 5555, 7777, 10001–10100, 14444) and to indicator IPs pushed from the parent.
+- [ ] **Files**: SHA-256 of new executables in temp folders, checked against the parent's indicator hashes.
+- [ ] Rate-limit and summarise reports, so a noisy host doesn't flood the parent.
+- [ ] Docker deployment option (already listed below) with read-only socket access, for Docker Desktop and NAS hosts.
+
+---
+
 ## Future Work
 
 | Feature | Notes |
