@@ -8,6 +8,7 @@ through this machine's IP address. That's it.
 Usage:
     python minion.py          (reads config.json in same directory)
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -109,6 +110,7 @@ def _get_machine_id() -> str:
 # IP + Geo helpers
 # ---------------------------------------------------------------------------
 
+
 async def get_public_ip() -> str | None:
     urls = [
         "https://api.ipify.org?format=json",
@@ -146,6 +148,7 @@ async def get_ip_geo(ip: str) -> dict:
 # ---------------------------------------------------------------------------
 # Proxy handler — the only real job of a minion
 # ---------------------------------------------------------------------------
+
 
 class ProxyHandler:
     def __init__(self, api_key: str, verify_ssl: bool = True):
@@ -202,9 +205,7 @@ class ProxyHandler:
         # and servers will return br-compressed content we can't decompress
         if "Accept-Encoding" in headers:
             ae = headers["Accept-Encoding"]
-            headers["Accept-Encoding"] = ", ".join(
-                p.strip() for p in ae.split(",") if p.strip().lower() != "br"
-            )
+            headers["Accept-Encoding"] = ", ".join(p.strip() for p in ae.split(",") if p.strip().lower() != "br")
 
         if not url:
             return web.json_response({"error": "url is required"}, status=400)
@@ -219,7 +220,8 @@ class ProxyHandler:
             ct = aiohttp.ClientTimeout(total=timeout)
             async with aiohttp.ClientSession(timeout=ct) as session:
                 async with session.request(
-                    method, url,
+                    method,
+                    url,
                     headers=headers,
                     data=req_body,
                     allow_redirects=follow,
@@ -235,15 +237,24 @@ class ProxyHandler:
                     if len(self._latencies) > 1000:
                         self._latencies = self._latencies[-500:]
 
-                    log.info("PROXY %s %s → %d (%.0fms, %d bytes)", method, url[:100], resp.status, elapsed, len(resp_body.encode()))
+                    log.info(
+                        "PROXY %s %s → %d (%.0fms, %d bytes)",
+                        method,
+                        url[:100],
+                        resp.status,
+                        elapsed,
+                        len(resp_body.encode()),
+                    )
 
-                    return web.json_response({
-                        "status_code": resp.status,
-                        "headers": resp_headers,
-                        "body": resp_body,
-                        "elapsed_ms": round(elapsed, 2),
-                        "worker_ip": self._public_ip or "unknown",
-                    })
+                    return web.json_response(
+                        {
+                            "status_code": resp.status,
+                            "headers": resp_headers,
+                            "body": resp_body,
+                            "elapsed_ms": round(elapsed, 2),
+                            "worker_ip": self._public_ip or "unknown",
+                        }
+                    )
         except asyncio.TimeoutError:
             log.warning("PROXY %s %s → TIMEOUT (%.0fms)", method, url[:100], (time.monotonic() - t0) * 1000)
             return web.json_response(
@@ -260,14 +271,16 @@ class ProxyHandler:
             self.active_requests -= 1
 
     async def handle_health(self, _request: web.Request) -> web.Response:
-        return web.json_response({
-            "status": "ok",
-            "version": VERSION,
-            "requests_proxied": self.request_count,
-            "active_requests": self.active_requests,
-            "socks_port": getattr(self, 'socks_port', None),
-            "socks_allowed_ips": sorted(getattr(self, '_socks_allowed_ips', set())),
-        })
+        return web.json_response(
+            {
+                "status": "ok",
+                "version": VERSION,
+                "requests_proxied": self.request_count,
+                "active_requests": self.active_requests,
+                "socks_port": getattr(self, 'socks_port', None),
+                "socks_allowed_ips": sorted(getattr(self, '_socks_allowed_ips', set())),
+            }
+        )
 
     async def handle_destroy(self, request: web.Request) -> web.Response:
         """Self-destruct: stop service, remove files, uninstall"""
@@ -295,11 +308,13 @@ class ProxyHandler:
         log.info("UPGRADE command received — starting upgrade")
 
         # Respond before upgrading (the restart will kill this process)
-        resp = web.json_response({
-            "status": "upgrading",
-            "current_version": VERSION,
-            "message": "Pulling latest code and restarting",
-        })
+        resp = web.json_response(
+            {
+                "status": "upgrading",
+                "current_version": VERSION,
+                "message": "Pulling latest code and restarting",
+            }
+        )
         await resp.prepare(request)
         await resp.write_eof()
 
@@ -319,7 +334,9 @@ class ProxyHandler:
             log.info("Cloning latest from %s", repo_url)
             result = subprocess.run(
                 ["git", "clone", "--depth", "1", repo_url, str(tmp)],
-                capture_output=True, text=True, timeout=60,
+                capture_output=True,
+                text=True,
+                timeout=60,
             )
             if result.returncode != 0:
                 log.error("Git clone failed: %s", result.stderr)
@@ -339,7 +356,8 @@ class ProxyHandler:
                 log.info("Installing requirements...")
                 subprocess.run(
                     [str(venv_pip), "install", "--quiet", "-r", str(install_dir / "requirements.txt")],
-                    timeout=120, capture_output=True,
+                    timeout=120,
+                    capture_output=True,
                 )
 
             # Cleanup
@@ -388,6 +406,7 @@ class ProxyHandler:
 # ---------------------------------------------------------------------------
 # SOCKS5 proxy server (RFC 1928, no-auth, CONNECT only)
 # ---------------------------------------------------------------------------
+
 
 class Socks5Server:
     """Minimal SOCKS5 proxy server (RFC 1928, no-auth, CONNECT only).
@@ -483,7 +502,7 @@ class Socks5Server:
             # 6. Relay data bidirectionally
             await self._relay(reader, writer, remote_reader, remote_writer)
 
-        except (asyncio.IncompleteReadError, ConnectionResetError, BrokenPipeError):
+        except (asyncio.IncompleteReadError, ConnectionResetError, BrokenPipeError) as _closed:
             pass
         except Exception as e:
             log.debug("SOCKS5 session error: %s", e)
@@ -495,6 +514,7 @@ class Socks5Server:
 
     async def _relay(self, client_reader, client_writer, remote_reader, remote_writer):
         """Bidirectional data relay between client and remote"""
+
         async def pipe(src, dst, track_bytes=False):
             try:
                 while True:
@@ -505,7 +525,7 @@ class Socks5Server:
                     await dst.drain()
                     if track_bytes:
                         self.proxy.bytes_transferred += len(data)
-            except (ConnectionResetError, BrokenPipeError, asyncio.CancelledError):
+            except (ConnectionResetError, BrokenPipeError, asyncio.CancelledError) as _closed:
                 pass
             finally:
                 try:
@@ -532,6 +552,7 @@ class Socks5Server:
 # Parent communication
 # ---------------------------------------------------------------------------
 
+
 class ParentClient:
     def __init__(self, server_url: str, api_key: str):
         self.url = server_url.rstrip("/")
@@ -555,7 +576,9 @@ class ParentClient:
         }
         try:
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as s:
-                async with s.post(f"{self.url}/api/worker-nodes/agent/register", json=payload, headers=self.headers) as r:
+                async with s.post(
+                    f"{self.url}/api/worker-nodes/agent/register", json=payload, headers=self.headers
+                ) as r:
                     if r.status == 200:
                         data = await r.json()
                         log.info("Registered with parent as '%s' (id: %s)", data.get("name"), data.get("node_id"))
@@ -578,7 +601,9 @@ class ParentClient:
         }
         try:
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as s:
-                async with s.post(f"{self.url}/api/worker-nodes/agent/heartbeat", json=payload, headers=self.headers) as r:
+                async with s.post(
+                    f"{self.url}/api/worker-nodes/agent/heartbeat", json=payload, headers=self.headers
+                ) as r:
                     if r.status == 200:
                         return await r.json()
                     log.warning("Heartbeat failed (%s)", r.status)
@@ -598,6 +623,7 @@ class ParentClient:
 # ---------------------------------------------------------------------------
 # Main loop
 # ---------------------------------------------------------------------------
+
 
 async def heartbeat_loop(parent: ParentClient, proxy: ProxyHandler, port: int, interval: int):
     while True:
