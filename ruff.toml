@@ -1,0 +1,40 @@
+# Python lint and format rules: the same file in every Ghostwire repo (ghostwire-suite/CONVENTIONS.md).
+# CI runs: ruff check . && ruff format --check .
+target-version = "py315"
+line-length = 120
+extend-exclude = ["**/alembic/versions", "reference", "**/node_modules", "**/.next"]
+
+[lint]
+select = [
+  "E", "W",   # pycodestyle
+  "F",        # pyflakes: unused and undefined names
+  "I",        # import order
+  "B",        # bugbear: likely bugs
+  "UP",       # pyupgrade: current syntax
+  "S",        # bandit: security
+  "ASYNC",    # blocking calls in async code
+  "SIM",      # simplifications
+  "RUF",      # ruff's own
+  "LOG",      # logging mistakes
+  "PT",       # pytest style
+]
+ignore = [
+  "E501",     # line length is the formatter's job
+  "E712",     # `col == True` builds SQL in SQLAlchemy filters; `is True` would break them
+  "S101",     # assert: tests use it (production code should not)
+  "PT018",    # one assert per condition: style only
+]
+
+[lint.per-file-ignores]
+"**/tests/**" = ["S", "B011"]
+"**/conftest.py" = ["S"]
+
+[lint.flake8-bugbear]
+# FastAPI's parameter declarations are evaluated once by design.
+extend-immutable-calls = [
+  "fastapi.Depends", "fastapi.Query", "fastapi.Path", "fastapi.Body", "fastapi.Header",
+  "fastapi.Cookie", "fastapi.Form", "fastapi.File", "fastapi.Security",
+]
+
+[format]
+quote-style = "preserve"
