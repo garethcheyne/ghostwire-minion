@@ -1,6 +1,6 @@
 # Ghostwire Minion — Roadmap
 
-Last updated: 2026-04-05
+Last updated: 2026-10-29
 
 ---
 
@@ -85,6 +85,20 @@ Last updated: 2026-04-05
 - [x] Post-install verification (service status, health check, SOCKS5 port check)
 - [x] Version display from local file, installed copy, or GitHub fetch
 
+## Phase 6b — Hardening review
+**Status:** COMPLETE (2026-10-29)
+
+- [x] SOCKS5 allowlist fails closed: an empty list lets nobody in (it used to let everyone in)
+- [x] SSRF checks on resolved addresses (names, redirects, CGNAT, IPv4-mapped and NAT64 forms, own public IP), not just IP literals
+- [x] API key compared in constant time; required by middleware on everything but `GET /health`
+- [x] `/proxy` request validation, response size limit, race-free concurrency limit, SOCKS5 timeouts and session cap
+- [x] `config.json` validated at start-up; secrets kept out of logs
+- [x] Registration retries until the parent answers; heartbeat loop can't die; shutdown closes SOCKS5 sessions
+- [x] `/destroy` works (it used to kill itself before removing anything) and handles OpenRC
+- [x] `/upgrade` runs `scripts/upgrade.sh --yes` outside the service sandbox; OpenRC handled
+- [x] `install.sh`: interactive `curl | bash` works, config written safely, steps checked, systemd unit sandboxed
+- [x] pytest tests for the security-relevant code, run in CI on Python 3.10 and 3.15
+
 ---
 
 ## Phase 7 — Host watch mode
@@ -113,7 +127,9 @@ A compromised Next.js container ran an XMRig miner, a backdoor root user, cron p
 | Bandwidth throttling | `bytes_transferred` tracked but not enforced |
 | TLS on proxy/SOCKS5 ports | Currently plaintext; relies on network trust or SSH tunnel |
 | SOCKS5 authentication | Currently relies on IP allowlist only |
-| Alpine OpenRC destroy/upgrade | `_self_destruct` and `_self_upgrade` use systemctl only |
+| Signed parent commands | `/destroy`, `/upgrade` and `/proxy` are authorised by the API key alone, sent in plaintext |
+| Non-root service user | Runs as root (sandboxed) because `/upgrade` and `/destroy` use `systemd-run` |
+| OpenRC supervision | OpenRC doesn't restart the minion if it crashes (`supervise-daemon` would) |
 | Config hot-reload | Currently requires restart for config changes |
 | Prometheus metrics endpoint | Expose `/metrics` for monitoring |
 | Docker deployment option | Alternative to bare-metal install |
@@ -132,6 +148,5 @@ A compromised Next.js container ran an XMRig miner, a backdoor root user, cron p
 | Root required | Install script must run as root for service management |
 | Single parent | Each minion can only register with one Ghostwire instance |
 | No SOCKS5 auth | SOCKS5 access is restricted by IP allowlist, not credentials |
-| No TLS on proxy | HTTP API and SOCKS5 are unencrypted |
-| Self-destruct is systemd-only | `_self_destruct()` uses systemd commands; OpenRC not handled |
-| Upgrade is systemd-only | `_self_upgrade()` restarts via systemctl; OpenRC not handled |
+| No TLS on proxy | HTTP API and SOCKS5 are unencrypted, so the API key can be sniffed between parent and minion |
+| Health is public | `GET /health` shows the version and the SOCKS5 allowlist (the parent's IPs) without the key; the parent reads it unauthenticated |
