@@ -277,6 +277,16 @@ configure() {
 # Install
 # ---------------------------------------------------------------------------
 
+# scripts/upgrade.sh upgrades this install later (sudo /opt/ghostwire-minion/scripts/upgrade.sh).
+# Written to a new file and moved into place: upgrade.sh may be the script running this installer.
+install_upgrade_script() {
+    [[ -f "$1/scripts/upgrade.sh" ]] || return 0
+    mkdir -p "$INSTALL_DIR/scripts"
+    cp "$1/scripts/upgrade.sh" "$INSTALL_DIR/scripts/upgrade.sh.new"
+    chmod 755 "$INSTALL_DIR/scripts/upgrade.sh.new"
+    mv -f "$INSTALL_DIR/scripts/upgrade.sh.new" "$INSTALL_DIR/scripts/upgrade.sh"
+}
+
 install_files() {
     info "Installing to $INSTALL_DIR ..."
     mkdir -p "$INSTALL_DIR"
@@ -297,6 +307,7 @@ install_files() {
         cp "$SCRIPT_DIR/minion.py"        "$INSTALL_DIR/"
         cp "$SCRIPT_DIR/requirements.txt" "$INSTALL_DIR/"
         cp "$SCRIPT_DIR/VERSION"          "$INSTALL_DIR/" 2>/dev/null || true
+        install_upgrade_script "$SCRIPT_DIR"
     else
         # Clean up any stale clone from previous run
         rm -rf /tmp/gw-minion-tmp
@@ -305,6 +316,7 @@ install_files() {
         cp /tmp/gw-minion-tmp/minion.py        "$INSTALL_DIR/"
         cp /tmp/gw-minion-tmp/requirements.txt "$INSTALL_DIR/"
         cp /tmp/gw-minion-tmp/VERSION          "$INSTALL_DIR/" 2>/dev/null || true
+        install_upgrade_script /tmp/gw-minion-tmp
         rm -rf /tmp/gw-minion-tmp
     fi
 
@@ -532,6 +544,7 @@ verify() {
     esac
 
     echo "  Config:   sudo cat $INSTALL_DIR/config.json"
+    echo "  Upgrade:  sudo $INSTALL_DIR/scripts/upgrade.sh"
     echo ""
     echo "  This minion should now appear in your Ghostwire"
     echo "  dashboard under Worker Nodes."

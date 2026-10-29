@@ -35,6 +35,24 @@ sudo ./install.sh --parent https://ghostwire.err403.com --key gw-node-YOUR_KEY -
 
 If `--parent` and `--key` are both provided, the installer runs fully non-interactive.
 
+## Upgrading
+
+Every Ghostwire app has the same `scripts/upgrade.sh`, with the same options and steps. The installer
+puts the minion's in `/opt/ghostwire-minion/scripts/`; run it on the minion as root:
+
+```bash
+sudo /opt/ghostwire-minion/scripts/upgrade.sh             # upgrade to the latest version (asks first)
+sudo /opt/ghostwire-minion/scripts/upgrade.sh --check     # say what an upgrade would do; changes nothing
+sudo /opt/ghostwire-minion/scripts/upgrade.sh --rollback  # go back to what ran before the last upgrade
+sudo /opt/ghostwire-minion/scripts/upgrade.sh --yes       # don't ask (cron); add a tag to go to that version
+```
+
+It downloads the new version, backs up `config.json` and the code, keeps the running code in
+`.previous` for `--rollback`, runs the new `install.sh` (which keeps your config), then checks that
+the service is running and the HTTP and SOCKS5 ports answer. Backups and a log of each run are kept
+in `/opt/ghostwire-minion/backups/`. A minion installed before the script existed gets it by running
+the install command once more.
+
 ## Supported Distros
 
 | Distro | Package Manager | Init System |
