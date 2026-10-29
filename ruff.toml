@@ -1,6 +1,6 @@
 # Python lint and format rules: the same file in every Ghostwire repo (ghostwire-suite/CONVENTIONS.md).
 # CI runs: ruff check . && ruff format --check .
-target-version = "py315"
+target-version = "py310"  # the oldest Python any of this code runs on (minion hosts, the analytics client); 3.15 code is fine with it
 line-length = 120
 extend-exclude = ["**/alembic/versions", "reference", "**/node_modules", "**/.next"]
 
