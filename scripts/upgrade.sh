@@ -2,7 +2,7 @@
 # Ghostwire Minion: upgrade this install to a new version. Run it on the minion, as root:
 #   sudo /opt/ghostwire-minion/scripts/upgrade.sh
 #
-#   scripts/upgrade.sh               upgrade to the latest version on main (asks first)
+#   scripts/upgrade.sh               upgrade to the latest release (asks first)
 #   scripts/upgrade.sh <version>     go to that tag or branch instead
 #   scripts/upgrade.sh --check       say what an upgrade would do; change nothing
 #   scripts/upgrade.sh --yes         don't ask (for cron and installers)
@@ -67,8 +67,8 @@ app_plan() {
     || fail "Couldn't download ${REF:-$BRANCH} from $REPO_URL (a tag or branch name)."
   CURRENT_LABEL="v$(installed_version "$PROJECT_DIR")"
   TARGET_LABEL="v$(installed_version "$WORK/src") ($(git -C "$WORK/src" rev-parse --short HEAD))"
-  if [ "$(installed_version "$PROJECT_DIR")" = "$(installed_version "$WORK/src")" ] \
-    && cmp -s "$PROJECT_DIR/minion.py" "$WORK/src/minion.py"; then
+  # Like TRACK=release in the other apps: a new version is a new VERSION.
+  if [ "$(installed_version "$PROJECT_DIR")" = "$(installed_version "$WORK/src")" ]; then
     UP_TO_DATE=true
   else
     UP_TO_DATE=false
@@ -286,7 +286,7 @@ built_services() {
       }
       service = ""
     }
-    END                     { flush() }'
+    END                     { flush() }' || true
 }
 
 docker_requirements() {
@@ -296,6 +296,7 @@ docker_requirements() {
   docker compose version > /dev/null 2>&1 || fail "Docker Compose v2 isn't available (docker compose)."
   docker info > /dev/null 2>&1 || fail "Can't talk to Docker (is it running? does this user need sudo?)."
   git rev-parse --git-dir > /dev/null 2>&1 || fail "$PROJECT_DIR isn't a git checkout."
+  docker compose config -q > /dev/null 2>&1 || fail "docker-compose.yml doesn't parse: run docker compose config to see why."
 }
 
 check_env() {
@@ -582,6 +583,8 @@ main() {
   APP_NAME=$(basename "$PROJECT_DIR")
   CURRENT_COMMIT="" CURRENT_LABEL="" TARGET_LABEL="" CHANGED=false UP_TO_DATE=false
   app_settings
+  # A URL built from other .env values (https://${APP_DOMAIN}) can't be shown as it is.
+  case "$APP_URL" in *'$'*) APP_URL="" ;; esac
 
   case "$BACKUP_DIR" in /*) ;; *) BACKUP_DIR="$PROJECT_DIR/$BACKUP_DIR" ;; esac
   mkdir -p "$BACKUP_DIR"
