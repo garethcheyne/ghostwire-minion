@@ -350,6 +350,178 @@ backup_database() {
   fi
 }
 
+backup_env() {
+  [ -f "$PROJECT_DIR/.env" ] || return 0
+  ENV_BACKUP="$BACKUP_DIR/upgrade-$STAMP.env"
+  (umask 077; cp "$PROJECT_DIR/.env" "$ENV_BACKUP")
+  ok "Settings: $ENV_BACKUP"
+}
+
+# ── Database password ───────────────────────────────────────────────────────────────────────────
+# random_secret LENGTH: letters and digits only, so it is safe in .env, a URL and SQL as it is.
+random_secret() {
+  local secret
+  secret=$(openssl rand -base64 $(($1 * 2)) 2> /dev/null | tr -dc 'A-Za-z0-9' | head -c "$1") || true
+  [ ${#secret} -eq "$1" ] || secret=$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c "$1") || true
+  [ ${#secret} -eq "$1" ] || fail "Couldn't make a random password (no openssl or /dev/urandom)."
+  printf '%s' "$secret"
+}
+
+sha256_of() {
+  if command -v sha256sum > /dev/null; then printf '%s' "$1" | sha256sum | cut -c1-64
+  else printf '%s' "$1" | shasum -a 256 | cut -c1-64; fi
+}
+
+# A password anyone could know: empty, a compose default, a placeholder from .env.example, or one
+# the app lists in WEAK_DB_PASSWORD_HASHES (the sha256 of passwords that were published, in git
+# history for example, so the script doesn't publish them again).
+weak_db_password() {
+  case "$1" in
+    "" | ghostwire | postgres | password | admin | *change-this* | *changeme* | *change_me*) return 0 ;;
+  esac
+  [ -n "$WEAK_DB_PASSWORD_HASHES" ] || return 1
+  case " $WEAK_DB_PASSWORD_HASHES " in *" $(sha256_of "$1") "*) return 0 ;; esac
+  return 1
+}
+
+# Pre-flight: decides whether this run changes the database password (ROTATE_DB).
+check_db_password() {
+  if [ -z "$DB_SERVICE" ] || [ -z "$DB_PASSWORD_ENV" ]; then
+    [ "$ROTATE_DB" = true ] && fail "$APP_NAME has no database password to change."
+    return 0
+  fi
+  if [ "$ROTATE_DB" = true ]; then
+    info "The database password will be changed (--rotate-db-password)."
+  elif weak_db_password "$DB_PASSWORD"; then
+    warn "The database password is a default or a published one, so this run changes it."
+    ROTATE_DB=true
+  elif [ ${#DB_PASSWORD} -lt 16 ]; then
+    warn "The database password is shorter than 16 characters (scripts/upgrade.sh --rotate-db-password changes it)."
+  else
+    ok "The database password isn't a default or a published one."
+  fi
+}
+
+# set_role_password CONTAINER CURRENT NEW
+set_role_password() {
+  local user=${DB_USER//\"/\"\"} password=${3//\'/\'\'}
+  printf 'ALTER ROLE "%s" PASSWORD '\''%s'\'';\n' "$user" "$password" \
+    | docker exec -i -e PGPASSWORD="$2" "$1" psql -X -q -v ON_ERROR_STOP=1 -U "$DB_USER" -d "$DB_NAME" > /dev/null
+}
+
+# write_env_password OLD NEW: the DB_PASSWORD_ENV line (added when .env has none) and :OLD@ in each
+# DB_URL_ENV line. Rewritten in place, so .env keeps its owner and mode.
+write_env_password() {
+  local tmp
+  tmp=$(mktemp)
+  OLD="$1" NEW="$2" KEY="$DB_PASSWORD_ENV" URLS=" $DB_URL_ENV " awk '
+    BEGIN { old = ENVIRON["OLD"]; new = ENVIRON["NEW"]; key = ENVIRON["KEY"]; urls = ENVIRON["URLS"] }
+    {
+      line = $0; rest = line
+      sub(/^[ \t]*(export[ \t]+)?/, "", rest)
+      prefix = substr(line, 1, length(line) - length(rest))
+      eq = index(rest, "=")
+      if (eq > 1) {
+        name = substr(rest, 1, eq - 1)
+        if (name == key) { print prefix name "=" new; found = 1; next }
+        if (index(urls, " " name " ") && (at = index(line, ":" old "@")))
+          line = substr(line, 1, at) new substr(line, at + length(old) + 1)
+      }
+      print line
+    }
+    END { if (!found) print key "=" new }' "$PROJECT_DIR/.env" > "$tmp"
+  cat "$tmp" > "$PROJECT_DIR/.env"
+  rm -f "$tmp"
+}
+
+# Changes the database password, then puts it in .env. Postgres keeps the sessions already open, so
+# the running app carries on until the deploy recreates its containers with the new .env. The new
+# password is proved over the network before .env changes; if it doesn't work the old one goes back.
+rotate_db_password() {
+  local container key value new old=$DB_PASSWORD
+  container=$(app_service_container "$DB_SERVICE")
+  if [ -z "$container" ] || [ "$(docker inspect -f '{{.State.Running}}' "$container" 2> /dev/null)" != true ]; then
+    [ "$ROTATE_ONLY" = true ] && fail "The database isn't running, so its password can't be changed."
+    warn "The database isn't running, so its password stays as it is (run --rotate-db-password once it is)."
+    ROTATE_DB=false
+    return 0
+  fi
+  [ -f "$PROJECT_DIR/.env" ] || fail ".env is missing, so there's nowhere to put a new password."
+  for key in $DB_URL_ENV; do
+    value=$(env_value "$key")
+    case "$value" in
+      "" | *'${'"$DB_PASSWORD_ENV"'}'* | *'$'"$DB_PASSWORD_ENV"* | *":$old@"*) ;;
+      *) fail "$key in .env doesn't hold the database password as :password@, so it can't be updated. Nothing has changed." ;;
+    esac
+  done
+
+  new=$(random_secret 40)
+  set_role_password "$container" "$old" "$new" || fail "Couldn't change the database password. Nothing has changed."
+  if ! docker exec -e PGPASSWORD="$new" "$container" \
+      psql -X -h "$DB_SERVICE" -U "$DB_USER" -d "$DB_NAME" -tAc 'SELECT 1' > /dev/null 2>&1; then
+    set_role_password "$container" "$new" "$old" || warn "Couldn't put the old password back either; it's in ${ENV_BACKUP:-.env}."
+    fail "The new database password didn't work, so the old one was put back. Nothing else has changed."
+  fi
+  write_env_password "$old" "$new"
+  OLD_DB_PASSWORD=$old
+  DB_PASSWORD=$new
+  ROTATED_DB=true
+  ok "The database password is changed and .env has the new one (the old .env: ${ENV_BACKUP:-none})."
+}
+
+# Puts the old password back in the database and the old .env back, then restarts with them.
+revert_db_password() {
+  local container
+  container=$(app_service_container "$DB_SERVICE")
+  set_role_password "$container" "$DB_PASSWORD" "$OLD_DB_PASSWORD" || { warn "Couldn't put the old database password back."; return 1; }
+  cat "$ENV_BACKUP" > "$PROJECT_DIR/.env"
+  DB_PASSWORD=$OLD_DB_PASSWORD
+  ROTATED_DB=false
+  app_deploy
+  ok "The old database password and .env are back."
+}
+
+# --rotate-db-password, and an up-to-date install whose password is a default or published one.
+# rotate_steps FIRST: Back up, Change the password, Health check, numbered from FIRST.
+rotate_steps() {
+  step "$1" "Back up"
+  BACKUP_FILE=""
+  app_backup
+  backup_env
+
+  step $(($1 + 1)) "Change the database password"
+  rotate_db_password
+  app_deploy
+
+  step $(($1 + 2)) "Health check"
+  if app_health && app_verify; then
+    ok "$APP_NAME is running on the new database password."
+    notify "database password changed"
+    return 0
+  fi
+  app_logs
+  warn "$APP_NAME isn't healthy on the new database password."
+  if [ "$ROTATED_DB" = true ] && ask --always "Put the old database password back?" && revert_db_password && app_health; then
+    fail "It wasn't healthy on the new password, so the old one is back."
+  fi
+  notify "database password changed but it isn't healthy"
+  fail "$APP_NAME isn't healthy on the new database password. The old .env is $ENV_BACKUP."
+}
+
+rotate_flow() {
+  STEPS=4
+  step 1 "Pre-flight"
+  app_requirements
+  check_env
+  check_db_password
+  if [ "$CHECK" = true ]; then
+    ok "That's what it would do (--check changes nothing)."
+    return 0
+  fi
+  ask "Change $APP_NAME's database password now?" || fail "Stopped. Nothing has changed."
+  rotate_steps 2
+}
+
 # Tags each running image as <image>:previous, for --rollback.
 snapshot_images() {
   local service image container id kept=""
@@ -563,13 +735,14 @@ rollback_flow() {
 }
 
 main() {
-  REF="" CHECK=false YES=false FORCE=false ROLLBACK=false
+  REF="" CHECK=false YES=false FORCE=false ROLLBACK=false ROTATE_ONLY=false
   while [ $# -gt 0 ]; do
     case "$1" in
       --check) CHECK=true ;;
       -y | --yes) YES=true ;;
       -f | --force) FORCE=true ;;
       --rollback) ROLLBACK=true ;;
+      --rotate-db-password) ROTATE_ONLY=true ;;
       -h | --help) usage; exit 0 ;;
       -*) fail "Unknown option $1 (see --help)." ;;
       *) [ -z "$REF" ] || fail "Give one version only."; REF=$1 ;;
@@ -580,6 +753,8 @@ main() {
   cd "$PROJECT_DIR"
   BRANCH=main TRACK=branch BACKUP_DIR=backups KEEP_BACKUPS=10 MIN_FREE_GB=3 HEALTH_TIMEOUT=180
   DB_SERVICE="" DB_USER="" DB_NAME="" DB_PASSWORD="" REQUIRED_ENV="" HEALTH_URLS="" APP_URL=""
+  DB_PASSWORD_ENV="" DB_URL_ENV="" WEAK_DB_PASSWORD_HASHES=""
+  ROTATE_DB=$ROTATE_ONLY ROTATED_DB=false OLD_DB_PASSWORD="" ENV_BACKUP=""
   APP_NAME=$(basename "$PROJECT_DIR")
   CURRENT_COMMIT="" CURRENT_LABEL="" TARGET_LABEL="" CHANGED=false UP_TO_DATE=false
   app_settings
@@ -604,6 +779,10 @@ main() {
     rollback_flow
     return 0
   fi
+  if [ "$ROTATE_ONLY" = true ]; then
+    rotate_flow
+    return 0
+  fi
 
   STEPS=8
   step 1 "Pre-flight"
@@ -611,11 +790,20 @@ main() {
   check_disk
   check_env
   app_preflight
+  check_db_password
 
   step 2 "Plan"
   app_plan
   if [ "$UP_TO_DATE" = true ] && [ "$FORCE" = false ] && app_is_running; then
     ok "Already up to date: $CURRENT_LABEL. (--force rebuilds and restarts anyway.)"
+    [ "$ROTATE_DB" = true ] || return 0
+    if [ "$CHECK" = true ]; then
+      ok "It would change the database password (--check changes nothing)."
+      return 0
+    fi
+    ask "Change the database password now?" || fail "Stopped. Nothing has changed."
+    STEPS=5
+    rotate_steps 3
     return 0
   fi
   if [ "$UP_TO_DATE" = true ]; then
@@ -623,6 +811,7 @@ main() {
   else
     info "$CURRENT_LABEL → $TARGET_LABEL"
   fi
+  [ "$ROTATE_DB" = true ] && info "The database password is changed just before the deploy."
   if [ "$CHECK" = true ]; then
     ok "That's what an upgrade would do (--check changes nothing)."
     return 0
@@ -632,10 +821,7 @@ main() {
   step 3 "Back up"
   BACKUP_FILE=""
   app_backup
-  if [ -f "$PROJECT_DIR/.env" ]; then
-    (umask 077; cp "$PROJECT_DIR/.env" "$BACKUP_DIR/upgrade-$STAMP.env")
-    ok "Settings: $BACKUP_DIR/upgrade-$STAMP.env"
-  fi
+  backup_env
   app_snapshot
   save_state
   # Keep the newest $KEEP_BACKUPS of each kind.
@@ -653,6 +839,7 @@ main() {
 
   step 6 "Deploy"
   notify "upgrading $CURRENT_LABEL → $TARGET_LABEL"
+  [ "$ROTATE_DB" = true ] && rotate_db_password
   app_deploy
 
   step 7 "Health check"
@@ -676,6 +863,7 @@ main() {
   CHANGED=false
   summary_line "Version" "$CURRENT_LABEL → $TARGET_LABEL"
   [ -n "$BACKUP_FILE" ] && summary_line "Backup" "$BACKUP_FILE"
+  [ "$ROTATED_DB" = true ] && summary_line "Database" "new password, in .env (the old .env: $ENV_BACKUP)"
   summary_line "Log" "$LOG"
   [ -n "$APP_URL" ] && summary_line "Open" "$APP_URL"
   summary_line "Roll back" "scripts/upgrade.sh --rollback"
