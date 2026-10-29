@@ -12,6 +12,9 @@
 #   sudo ./install.sh --parent https://ghostwire.err403.com --key gw-node-xxxx [--port 1080]
 # =============================================================================
 
+# Everything runs from main, called on the last line, so a download cut short by `curl | bash`
+# runs nothing rather than half an install.
+
 # ---------------------------------------------------------------------------
 # Parse CLI arguments
 # ---------------------------------------------------------------------------
@@ -20,11 +23,17 @@ ARG_PARENT=""
 ARG_KEY=""
 ARG_PORT=""
 
+parse_args() {
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --parent|-p)  ARG_PARENT="$2"; shift 2 ;;
-        --key|-k)     ARG_KEY="$2";    shift 2 ;;
-        --port)       ARG_PORT="$2";   shift 2 ;;
+        --parent|-p|--key|-k|--port)
+            [[ $# -ge 2 && -n "$2" ]] || { echo "$1 needs a value (see --help)"; exit 1; }
+            case "$1" in
+                --parent|-p) ARG_PARENT="$2" ;;
+                --key|-k)    ARG_KEY="$2" ;;
+                --port)      ARG_PORT="$2" ;;
+            esac
+            shift 2 ;;
         --help|-h)
             echo "Usage: install.sh [--parent URL] [--key API_KEY] [--port PORT]"
             echo ""
@@ -40,6 +49,7 @@ while [[ $# -gt 0 ]]; do
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
 done
+}
 
 INSTALL_DIR="/opt/ghostwire-minion"
 SERVICE_NAME="ghostwire-minion"
@@ -53,11 +63,35 @@ warn()  { echo -e "${YELLOW}[!]${NC} $1"; }
 error() { echo -e "${RED}[✗]${NC} $1"; exit 1; }
 ask()   { echo -ne "${CYAN}[?]${NC} $1"; }
 
+# Prompts read the terminal, not stdin: with `curl | bash`, stdin is this script.
+prompt() {
+    local __var="$1" __flags="${2:-}" __value=""
+    [[ -r /dev/tty ]] || error "No terminal to ask on: pass --parent and --key (see --help)"
+    # shellcheck disable=SC2086
+    IFS= read -r $__flags __value < /dev/tty 2>/dev/null \
+        || error "No terminal to ask on: pass --parent and --key (see --help)"
+    [[ "$__flags" == *s* ]] && echo ""
+    printf -v "$__var" '%s' "$__value"
+}
+
+valid_url()  { [[ "$1" =~ ^https?://[^[:space:]\"\\]+$ ]]; }
+valid_key()  { [[ "$1" =~ ^gw-node-[A-Za-z0-9_-]+$ ]]; }
+valid_port() { [[ "$1" =~ ^[0-9]{1,5}$ ]] && (( 10#$1 >= 1 && 10#$1 <= 65534 )); }
+
+check_settings() {
+    valid_url "$SERVER_URL" || error "URL must start with http:// or https:// and contain no spaces or quotes"
+    valid_key "$API_KEY"    || error "Key must start with 'gw-node-' — get it from Ghostwire → Worker Nodes"
+    valid_port "$PROXY_PORT" || error "Port must be a number from 1 to 65534 (SOCKS5 uses the next port up)"
+    PROXY_PORT=$((10#$PROXY_PORT))
+    [[ "$SERVER_URL" =~ ^https:// ]] || warn "The parent URL is plain http: the API key will cross the network unencrypted"
+}
+
 banner() {
     # Read version from VERSION file (local clone, installed copy, or GitHub)
     local ver="unknown"
     local script_dir
-    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+    script_dir=""
+    [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]] && script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
     if [[ -n "$script_dir" && -f "$script_dir/VERSION" ]]; then
         ver=$(cat "$script_dir/VERSION" | tr -d '[:space:]')
     elif [[ -f "$INSTALL_DIR/VERSION" ]]; then
@@ -226,13 +260,11 @@ configure() {
         SERVER_URL="${ARG_PARENT%/}"
         API_KEY="$ARG_KEY"
         PROXY_PORT="${ARG_PORT:-1080}"
-
-        [[ "$SERVER_URL" =~ ^https?:// ]] || error "URL must start with http:// or https://"
-        [[ "$API_KEY" =~ ^gw-node- ]] || error "Key must start with 'gw-node-' — get it from Ghostwire → Worker Nodes"
+        check_settings
 
         info "Non-interactive mode"
         info "Parent:  $SERVER_URL"
-        info "API key: ${API_KEY:0:20}..."
+        info "API key: ${API_KEY:0:12}..."
         info "Port:    $PROXY_PORT"
         return
     fi
@@ -243,31 +275,30 @@ configure() {
     echo ""
 
     ask "Who is your parent? (Ghostwire server URL): "
-    read -r SERVER_URL
+    prompt SERVER_URL
     SERVER_URL="${SERVER_URL%/}"
     [[ -z "$SERVER_URL" ]] && error "Server URL is required"
-    [[ "$SERVER_URL" =~ ^https?:// ]] || error "URL must start with http:// or https://"
 
     echo ""
-    ask "API key for this minion: "
-    read -r API_KEY
+    ask "API key for this minion (not shown): "
+    prompt API_KEY -s
     [[ -z "$API_KEY" ]] && error "API key is required"
-    [[ "$API_KEY" =~ ^gw-node- ]] || error "Key must start with 'gw-node-' — get it from Ghostwire → Worker Nodes"
 
     echo ""
     ask "Proxy listen port [1080]: "
-    read -r PROXY_PORT
+    prompt PROXY_PORT
     PROXY_PORT="${PROXY_PORT:-1080}"
+    check_settings
 
     echo ""
     info "Configuration:"
     echo "    Parent:     $SERVER_URL"
-    echo "    API key:    ${API_KEY:0:20}..."
+    echo "    API key:    ${API_KEY:0:12}..."
     echo "    Port:       $PROXY_PORT"
     echo ""
 
     ask "Correct? [Y/n] "
-    read -r OK
+    prompt OK
     if [[ "$OK" =~ ^[Nn] ]]; then
         error "Cancelled"
     fi
@@ -301,24 +332,22 @@ install_files() {
         fi
     fi
 
-    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    # Run from a clone (or by upgrade.sh): copy from beside this script. Piped from curl: download.
+    SCRIPT_DIR=""
+    [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]] && SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-    if [[ -f "$SCRIPT_DIR/minion.py" ]]; then
-        cp "$SCRIPT_DIR/minion.py"        "$INSTALL_DIR/"
-        cp "$SCRIPT_DIR/requirements.txt" "$INSTALL_DIR/"
-        cp "$SCRIPT_DIR/VERSION"          "$INSTALL_DIR/" 2>/dev/null || true
-        install_upgrade_script "$SCRIPT_DIR"
-    else
-        # Clean up any stale clone from previous run
-        rm -rf /tmp/gw-minion-tmp
+    local src="$SCRIPT_DIR" clone_dir=""
+    if [[ -z "$SCRIPT_DIR" || ! -f "$SCRIPT_DIR/minion.py" ]]; then
+        # Piped from curl: download the code into a private temporary folder.
         ensure_cmd git
-        git clone --depth 1 "$REPO_URL" /tmp/gw-minion-tmp
-        cp /tmp/gw-minion-tmp/minion.py        "$INSTALL_DIR/"
-        cp /tmp/gw-minion-tmp/requirements.txt "$INSTALL_DIR/"
-        cp /tmp/gw-minion-tmp/VERSION          "$INSTALL_DIR/" 2>/dev/null || true
-        install_upgrade_script /tmp/gw-minion-tmp
-        rm -rf /tmp/gw-minion-tmp
+        clone_dir="$(mktemp -d)" || error "Couldn't create a temporary folder"
+        git clone --quiet --depth 1 "$REPO_URL" "$clone_dir/src" || { rm -rf "$clone_dir"; error "Couldn't download $REPO_URL"; }
+        src="$clone_dir/src"
     fi
+    cp "$src/minion.py" "$src/requirements.txt" "$INSTALL_DIR/" || error "Couldn't copy the code to $INSTALL_DIR"
+    cp "$src/VERSION" "$INSTALL_DIR/" 2>/dev/null || true
+    install_upgrade_script "$src" || error "Couldn't install scripts/upgrade.sh"
+    [[ -z "$clone_dir" ]] || rm -rf "$clone_dir"
 
     # Flush old bytecode cache so Python picks up the new code
     find "$INSTALL_DIR" -name "*.pyc" -delete 2>/dev/null || true
@@ -344,23 +373,26 @@ install_files() {
     python3 -m venv "$INSTALL_DIR/venv" || {
         # Some minimal distros need ensurepip — try without pip then bootstrap
         warn "venv creation failed — trying without pip..."
-        python3 -m venv --without-pip "$INSTALL_DIR/venv"
-        curl -fsSL https://bootstrap.pypa.io/get-pip.py | "$INSTALL_DIR/venv/bin/python"
+        python3 -m venv --without-pip "$INSTALL_DIR/venv" || error "Couldn't create the Python environment"
+        curl -fsSL https://bootstrap.pypa.io/get-pip.py | "$INSTALL_DIR/venv/bin/python" || error "Couldn't install pip"
     }
-    "$INSTALL_DIR/venv/bin/pip" install --quiet --upgrade pip
-    "$INSTALL_DIR/venv/bin/pip" install --quiet -r "$INSTALL_DIR/requirements.txt"
+    "$INSTALL_DIR/venv/bin/pip" install --quiet --upgrade pip || warn "Couldn't upgrade pip; carrying on with the bundled one"
+    "$INSTALL_DIR/venv/bin/pip" install --quiet -r "$INSTALL_DIR/requirements.txt" || error "Couldn't install the Python packages"
 
-    # Write config on fresh install only
+    # Write config on fresh install only. json.dump does the quoting; the umask keeps the key private
+    # from the moment the file exists.
     if [[ "$UPGRADE" != true ]]; then
-        cat > "$INSTALL_DIR/config.json" <<EOF
-{
-    "server_url": "$SERVER_URL",
-    "api_key": "$API_KEY",
-    "proxy_port": $PROXY_PORT
-}
-EOF
-        chmod 600 "$INSTALL_DIR/config.json"
+        ( umask 077
+          GW_URL="$SERVER_URL" GW_KEY="$API_KEY" GW_PORT="$PROXY_PORT" python3 -c '
+import json, os, sys
+config = {"server_url": os.environ["GW_URL"], "api_key": os.environ["GW_KEY"], "proxy_port": int(os.environ["GW_PORT"])}
+with open(sys.argv[1], "w") as f:
+    json.dump(config, f, indent=4)
+    f.write("\n")
+' "$INSTALL_DIR/config.json.new" && mv -f "$INSTALL_DIR/config.json.new" "$INSTALL_DIR/config.json"
+        ) || error "Couldn't write $INSTALL_DIR/config.json"
     fi
+    chmod 600 "$INSTALL_DIR/config.json"
     info "SOCKS5 allowlist managed by parent server (via registration + heartbeat)"
     info "Files installed"
 }
@@ -422,12 +454,31 @@ WorkingDirectory=$INSTALL_DIR
 ExecStart=$INSTALL_DIR/venv/bin/python $INSTALL_DIR/minion.py
 Restart=always
 RestartSec=10
+TimeoutStopSec=30
 StandardOutput=journal
 StandardError=journal
+# Sandbox. The minion only needs the network and its own folder; /upgrade and /destroy run their
+# work outside this sandbox through systemd-run. Older systemd ignores settings it doesn't know.
+UMask=0077
 NoNewPrivileges=true
 ProtectSystem=strict
 ReadWritePaths=$INSTALL_DIR
 PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 
 [Install]
 WantedBy=multi-user.target
@@ -555,14 +606,19 @@ verify() {
 # Go
 # ---------------------------------------------------------------------------
 
-banner
-check_root
-detect_system
-check_python
-ensure_cmd curl
-detect_existing
-configure
-install_files
-open_firewall
-install_service
-verify
+main() {
+    parse_args "$@"
+    banner
+    check_root
+    detect_system
+    check_python
+    ensure_cmd curl
+    detect_existing
+    configure
+    install_files
+    open_firewall
+    install_service
+    verify
+}
+
+main "$@"
