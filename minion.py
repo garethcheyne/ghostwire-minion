@@ -25,6 +25,7 @@ import math
 import os
 import platform
 import re
+import shlex
 import shutil
 import signal
 import socket
@@ -590,7 +591,8 @@ class ProxyHandler:
         self._public_ip: str | None = None
         self.socks_port: int = 0
         self._background: set[asyncio.Task[Any]] = set()
-        self._lifecycle_started_at: float | None = None
+        self._upgrade_started_at: float | None = None
+        self._destroying = False
 
     @property
     def avg_latency_ms(self) -> float | None:
@@ -713,37 +715,41 @@ class ProxyHandler:
 
         asyncio.get_running_loop().call_later(delay, start)
 
-    def _claim_lifecycle(self) -> bool:
-        """One upgrade or removal at a time. A claim lapses after 15 minutes, in case the upgrade
-        script failed without restarting the service."""
-        now = time.monotonic()
-        if self._lifecycle_started_at is not None and now - self._lifecycle_started_at < 900:
-            log.info("An upgrade or removal is already under way")
-            return False
-        self._lifecycle_started_at = now
-        return True
-
     async def upgrade(self) -> None:
-        if not self._claim_lifecycle():
+        """Start an upgrade, unless one started in the last 15 minutes or the minion is being removed.
+
+        The 15 minutes let a later request through if the upgrade script failed without restarting
+        the service (when it succeeds, the restart starts a new process anyway).
+        """
+        now = time.monotonic()
+        if self._destroying:
+            log.info("Not upgrading: the minion is being removed")
             return
+        if self._upgrade_started_at is not None and now - self._upgrade_started_at < 900:
+            log.info("An upgrade is already under way")
+            return
+        self._upgrade_started_at = now
         try:
             started = await asyncio.to_thread(start_upgrade)
         except Exception:
             log.exception("Upgrade failed")
             started = False
         if not started:
-            self._lifecycle_started_at = None
+            self._upgrade_started_at = None
 
     async def _destroy(self) -> None:
-        if not self._claim_lifecycle():
+        """Remove the minion. Goes ahead even while an upgrade is running: removal wins."""
+        if self._destroying:
+            log.info("Removal is already under way")
             return
+        self._destroying = True
         try:
             started = await asyncio.to_thread(start_destroy)
         except Exception:
             log.exception("Self-destruct failed")
             started = False
         if not started:
-            self._lifecycle_started_at = None
+            self._destroying = False
 
 
 def build_app(proxy: ProxyHandler) -> web.Application:
@@ -886,11 +892,28 @@ def _upgrade_in_place() -> bool:
     os._exit(0)
 
 
-_DESTROY_SYSTEMD = (
-    'systemctl disable --now "$1"; rm -f "/etc/systemd/system/$1.service"; systemctl daemon-reload; '
-    '[ -z "$2" ] || rm -rf "$2"'
-)
-_DESTROY_OPENRC = 'rc-service "$1" stop; rc-update del "$1" default; rm -f "/etc/init.d/$1"; [ -z "$2" ] || rm -rf "$2"'
+def destroy_command(systemd: bool, service: str, remove_dir: str) -> str:
+    """The uninstall command for sh -c. Each step carries on if the one before failed.
+
+    One line with no ";" or "$": systemd-run writes it into a unit file, where a lone ";" separates
+    commands, "$" expands variables and a newline ends the setting.
+    """
+    svc = shlex.quote(service)
+    if systemd:
+        steps = [
+            f"systemctl disable --now {svc}",
+            f"rm -f {shlex.quote(f'/etc/systemd/system/{service}.service')}",
+            "systemctl daemon-reload",
+        ]
+    else:
+        steps = [
+            f"rc-service {svc} stop",
+            f"rc-update del {svc} default",
+            f"rm -f {shlex.quote(f'/etc/init.d/{service}')}",
+        ]
+    if remove_dir:
+        steps.append(f"rm -rf {shlex.quote(remove_dir)}")
+    return " && ".join(f"({step} || :)" for step in steps)
 
 
 def start_destroy() -> bool:
@@ -902,16 +925,14 @@ def start_destroy() -> bool:
         )
     sh = shutil.which("sh") or "/bin/sh"
     if _systemd_running():
-        script = _DESTROY_SYSTEMD
+        command = destroy_command(True, SERVICE_NAME, remove_dir)
     elif shutil.which("rc-service"):
-        script = _DESTROY_OPENRC
+        command = destroy_command(False, SERVICE_NAME, remove_dir)
     else:
         log.error("Neither systemd nor OpenRC is running here, so the minion can't remove itself")
         return False
     # The uninstaller runs outside this service (run_detached), so stopping the service doesn't stop it.
-    return run_detached(
-        [sh, "-c", script, f"{SERVICE_NAME}-destroy", SERVICE_NAME, remove_dir], f"{SERVICE_NAME}-destroy"
-    )
+    return run_detached([sh, "-c", command], f"{SERVICE_NAME}-destroy")
 
 
 # ---------------------------------------------------------------------------

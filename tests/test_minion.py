@@ -538,11 +538,20 @@ def test_destroy_and_upgrade_run_after_responding(monkeypatch):
             assert (await r.json())["current_version"] == minion.VERSION
             await asyncio.sleep(1.3)
             assert called == ["upgrade"]
-            # Only one upgrade or removal at a time.
-            r = await client.post("/destroy", headers={"X-Minion-API-Key": KEY})
-            assert (await r.json())["status"] == "destroying"
+            # A second upgrade while the first is under way is ignored.
+            await client.post("/upgrade", headers={"X-Minion-API-Key": KEY})
             await asyncio.sleep(1.3)
             assert called == ["upgrade"]
+            # Removal goes ahead even with an upgrade under way, and only once.
+            r = await client.post("/destroy", headers={"X-Minion-API-Key": KEY})
+            assert (await r.json())["status"] == "destroying"
+            await client.post("/destroy", headers={"X-Minion-API-Key": KEY})
+            await asyncio.sleep(1.3)
+            assert called == ["upgrade", "destroy"]
+            # No upgrades once removal has started.
+            await client.post("/upgrade", headers={"X-Minion-API-Key": KEY})
+            await asyncio.sleep(1.3)
+            assert called == ["upgrade", "destroy"]
         finally:
             await client.close()
 
@@ -891,12 +900,22 @@ def test_destroy_only_deletes_the_standard_install_folder(monkeypatch, tmp_path)
 
     monkeypatch.setattr(minion, "INSTALL_DIR", tmp_path)
     assert minion.start_destroy() is True
-    assert started[-1][-1] == ""  # not /opt/ghostwire-minion: files are kept
+    assert "rm -rf" not in started[-1][2]  # not /opt/ghostwire-minion: files are kept
 
     monkeypatch.setattr(minion, "INSTALL_DIR", minion.DEFAULT_INSTALL_DIR)
     assert minion.start_destroy() is True
-    assert started[-1][-2:] == ["ghostwire-minion", "/opt/ghostwire-minion"]
-    assert "systemctl disable --now" in started[-1][2]
+    assert started[-1][2] == (
+        "(systemctl disable --now ghostwire-minion || :) && "
+        "(rm -f /etc/systemd/system/ghostwire-minion.service || :) && "
+        "(systemctl daemon-reload || :) && (rm -rf /opt/ghostwire-minion || :)"
+    )
+
+
+def test_destroy_command_for_openrc_has_no_separators_systemd_would_mangle():
+    command = minion.destroy_command(False, "ghostwire-minion", "/opt/ghostwire-minion")
+    assert command.startswith("(rc-service ghostwire-minion stop || :)")
+    assert "rm -f /etc/init.d/ghostwire-minion" in command
+    assert not any(c in command for c in ";$\n")
 
 
 def test_destroy_without_a_service_manager_does_nothing(monkeypatch):
