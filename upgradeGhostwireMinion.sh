@@ -79,6 +79,7 @@ app_plan() {
 
 app_backup() {
   BACKUP_FILE="$BACKUP_DIR/upgrade-$STAMP.tar.gz"
+  # shellcheck disable=SC2046 # VERSION, when there is one
   (umask 077; tar czf "$BACKUP_FILE" -C "$PROJECT_DIR" config.json minion.py requirements.txt $(cd "$PROJECT_DIR" && ls VERSION 2> /dev/null))
   ok "Config and code: $BACKUP_FILE"
 }
@@ -106,8 +107,8 @@ app_deploy() {
 }
 
 app_health() {
-  local socks=$((PORT + 1)) i
-  for i in $(seq 1 12); do app_is_running && break; sleep 5; done
+  local socks=$((PORT + 1))
+  for _ in $(seq 1 12); do app_is_running && break; sleep 5; done
   app_is_running || { warn "The $SERVICE service isn't running."; return 1; }
   ok "The $SERVICE service is running."
   check_urls || return 1
