@@ -10,13 +10,13 @@ on the distro's own Python, 3.10 or later.
 **Interactive** — you'll be prompted for parent URL and API key:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/garethcheyne/ghostwire-minion/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/garethcheyne/ghostwire-minion/main/installGhostwireMinion.sh | sudo bash
 ```
 
 **Non-interactive** — pass everything on the command line (ideal for scripting/automation):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/garethcheyne/ghostwire-minion/main/install.sh \
+curl -fsSL https://raw.githubusercontent.com/garethcheyne/ghostwire-minion/main/installGhostwireMinion.sh \
   | sudo bash -s -- --parent https://ghostwire.err403.com --key gw-node-YOUR_KEY
 ```
 
@@ -25,7 +25,7 @@ Or clone and run manually:
 ```bash
 git clone https://github.com/garethcheyne/ghostwire-minion.git
 cd ghostwire-minion
-sudo ./install.sh --parent https://ghostwire.err403.com --key gw-node-YOUR_KEY --port 1080
+sudo ./installGhostwireMinion.sh --parent https://ghostwire.err403.com --key gw-node-YOUR_KEY --port 1080
 ```
 
 ### Install options
@@ -35,12 +35,19 @@ sudo ./install.sh --parent https://ghostwire.err403.com --key gw-node-YOUR_KEY -
 | `--parent`, `-p` | Ghostwire server URL |
 | `--key`, `-k` | Minion API key (starts with `gw-node-`) |
 | `--port` | HTTP API port (default: `1080`); SOCKS5 listens on the next port up |
+| `--yes` | Don't ask (implied by `--parent` with `--key`) |
+| `--check` | Say what an install would do; change nothing |
+| `--settings-only` | Write `config.json` and stop |
 
 If `--parent` and `--key` are both provided, the installer runs fully non-interactive. Otherwise it
 asks on the terminal (also when piped from curl). Use an `https://` parent URL: with `http://` the API
 key crosses the network unencrypted, and the installer and the minion both warn about it.
 
-Running the installer again on a machine that has the minion upgrades the code and keeps `config.json`.
+Every Ghostwire app's installer has the same options, steps (1 Pre-flight, 2 Settings, 3 Build,
+4 Start, 5 Health check, 6 Admin account, 7 Done) and output; the log of each run goes in
+`/opt/ghostwire-minion/backups/`. Running the installer again on a machine that has the minion
+upgrades the code and keeps `config.json`. `install.sh` still works (it forwards to
+`installGhostwireMinion.sh`), for one-liners published before and for older minions' upgrades.
 
 ## Configuration
 
@@ -85,21 +92,22 @@ so the parent should reach the minion over a network you trust or a tunnel.
 
 ## Upgrading
 
-Every Ghostwire app has the same `scripts/upgrade.sh`, with the same options and steps. The installer
-puts the minion's in `/opt/ghostwire-minion/scripts/`; run it on the minion as root:
+Every Ghostwire app has an upgrade script at its root with the same options and steps. The installer
+puts the minion's beside it in `/opt/ghostwire-minion/`; run it on the minion as root:
 
 ```bash
-sudo /opt/ghostwire-minion/scripts/upgrade.sh             # upgrade to the latest version (asks first)
-sudo /opt/ghostwire-minion/scripts/upgrade.sh --check     # say what an upgrade would do; changes nothing
-sudo /opt/ghostwire-minion/scripts/upgrade.sh --rollback  # go back to what ran before the last upgrade
-sudo /opt/ghostwire-minion/scripts/upgrade.sh --yes       # don't ask (cron); add a tag to go to that version
+sudo /opt/ghostwire-minion/upgradeGhostwireMinion.sh             # upgrade to the latest version (asks first)
+sudo /opt/ghostwire-minion/upgradeGhostwireMinion.sh --check     # say what an upgrade would do; changes nothing
+sudo /opt/ghostwire-minion/upgradeGhostwireMinion.sh --rollback  # go back to what ran before the last upgrade
+sudo /opt/ghostwire-minion/upgradeGhostwireMinion.sh --yes       # don't ask (cron); add a tag to go to that version
 ```
 
 It downloads the new version, backs up `config.json` and the code, keeps the running code in
-`.previous` for `--rollback`, runs the new `install.sh` (which keeps your config), then checks that
-the service is running and the HTTP and SOCKS5 ports answer. Backups and a log of each run are kept
-in `/opt/ghostwire-minion/backups/`. A minion installed before the script existed gets it by running
-the install command once more.
+`.previous` for `--rollback`, runs the new version's installer (which keeps your config), then checks
+that the service is running and the HTTP and SOCKS5 ports answer. Backups and a log of each run are
+kept in `/opt/ghostwire-minion/backups/`. `/opt/ghostwire-minion/scripts/upgrade.sh` still works (it
+forwards to `upgradeGhostwireMinion.sh`), for minions and cron jobs that call the old path. A minion
+installed before there was an upgrade script gets one by running the install command once more.
 
 ## Supported Distros
 
@@ -144,7 +152,7 @@ That's it. The minion registers itself, starts proxying, and reports back to the
 |----------|-----|------|
 | `GET /health` | no | Version, request counts, the SOCKS5 port and allowlist |
 | `POST /proxy` | yes | Makes the request in the JSON body (`url`, `method`, `headers`, `body`, `timeout`, `follow_redirects`) and returns `status_code`, `headers`, `body`, `elapsed_ms`, `worker_ip`. 400 for a bad request, 403 for an internal target, 429 when busy, 502 when the target fails, 504 on timeout |
-| `POST /upgrade` | yes | Runs `scripts/upgrade.sh --yes`, which upgrades to the latest release and restarts the service |
+| `POST /upgrade` | yes | Runs `upgradeGhostwireMinion.sh --yes`, which upgrades to the latest release and restarts the service |
 | `POST /destroy` | yes | Stops the service and removes it and `/opt/ghostwire-minion` |
 
 ## Commands

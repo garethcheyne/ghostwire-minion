@@ -59,7 +59,7 @@ INSTALL_DIR = Path(__file__).resolve().parent
 CONFIG_FILE = INSTALL_DIR / "config.json"
 VERSION_FILE = INSTALL_DIR / "VERSION"
 SERVICE_NAME = "ghostwire-minion"
-# Where install.sh puts the minion. /destroy only deletes files when it's running from here.
+# Where installGhostwireMinion.sh puts the minion. /destroy only deletes files when it's running from here.
 DEFAULT_INSTALL_DIR = Path("/opt/ghostwire-minion")
 REPO_URL = "https://github.com/garethcheyne/ghostwire-minion.git"
 
@@ -174,7 +174,7 @@ def parse_config(raw: Any) -> Config:
 
 def load_config(path: Path = CONFIG_FILE) -> Config:
     if not path.is_file():
-        raise ConfigError(f"{path} not found: run install.sh first")
+        raise ConfigError(f"{path} not found: run installGhostwireMinion.sh first")
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError) as exc:
@@ -691,7 +691,7 @@ class ProxyHandler:
         return resp
 
     async def handle_upgrade(self, request: web.Request) -> web.StreamResponse:
-        """Upgrade to the latest release (scripts/upgrade.sh), which restarts the service."""
+        """Upgrade to the latest release (upgradeGhostwireMinion.sh), which restarts the service."""
         log.info("UPGRADE command received — starting upgrade")
         resp = web.json_response(
             {
@@ -821,20 +821,42 @@ def run_detached(argv: list[str], name: str) -> bool:
         return False
 
 
+UPGRADE_SCRIPT = "upgradeGhostwireMinion.sh"
+
+
+def upgrade_script() -> Path | None:
+    """The suite's upgrade script in this install, or None.
+
+    upgradeGhostwireMinion.sh, or scripts/upgrade.sh on installs from before it had that name. Since
+    the rename scripts/upgrade.sh only forwards to the new one, so it's no use without it (an install
+    upgraded in place by an older minion.py, which didn't copy the new name).
+    """
+    script = INSTALL_DIR / UPGRADE_SCRIPT
+    if script.is_file():
+        return script
+    old = INSTALL_DIR / "scripts" / "upgrade.sh"
+    try:
+        if old.is_file() and UPGRADE_SCRIPT not in old.read_text(encoding="utf-8", errors="replace"):
+            return old
+    except OSError:
+        pass
+    return None
+
+
 def start_upgrade() -> bool:
     """Start an upgrade. Blocking; call it in a thread. True when the upgrade was started."""
-    script = INSTALL_DIR / "scripts" / "upgrade.sh"
+    script = upgrade_script()
     bash = shutil.which("bash")
-    if script.is_file() and bash:
-        # The suite's upgrade script: backs up, downloads the release, runs its install.sh, checks
+    if script and bash:
+        # The suite's upgrade script: backs up, downloads the release, runs its installer, checks
         # health, and stops and starts this service itself. Its log goes to backups/.
         return run_detached([bash, str(script), "--yes"], f"{SERVICE_NAME}-upgrade")
-    log.info("No scripts/upgrade.sh here, so upgrading in place")
+    log.info("No upgrade script here, so upgrading in place")
     return _upgrade_in_place()
 
 
 def _upgrade_in_place() -> bool:
-    """Upgrade for installs from before scripts/upgrade.sh: copy the new code in and restart."""
+    """Upgrade for installs from before the upgrade script: copy the new code in and restart."""
     git = shutil.which("git")
     if not git:
         log.error("Upgrade needs git, which isn't installed")
@@ -852,7 +874,8 @@ def _upgrade_in_place() -> bool:
             log.error("git clone failed: %s", result.stderr.strip())
             return False
         src = tmp / "src"
-        for name in ("minion.py", "requirements.txt", "install.sh", "VERSION", "scripts/upgrade.sh"):
+        names = ("minion.py", "requirements.txt", "VERSION", UPGRADE_SCRIPT, "scripts/upgrade.sh")
+        for name in names:
             if (src / name).is_file():
                 dest = INSTALL_DIR / name
                 dest.parent.mkdir(parents=True, exist_ok=True)

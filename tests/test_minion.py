@@ -893,6 +893,31 @@ def test_upgrade_uses_the_upgrade_script(monkeypatch, tmp_path):
     assert started == [["/usr/bin/bash", str(tmp_path / "scripts" / "upgrade.sh"), "--yes"]]
 
 
+def test_upgrade_prefers_the_upgrade_script_at_the_root(monkeypatch, tmp_path):
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "upgrade.sh").write_text('exec "$(dirname "$0")/../upgradeGhostwireMinion.sh" "$@"\n')
+    (tmp_path / "upgradeGhostwireMinion.sh").write_text("#!/bin/bash\n")
+    started = []
+    monkeypatch.setattr(minion, "INSTALL_DIR", tmp_path)
+    monkeypatch.setattr(minion.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(minion, "run_detached", lambda argv, name: started.append(argv) or True)
+    assert minion.start_upgrade() is True
+    assert started == [["/usr/bin/bash", str(tmp_path / "upgradeGhostwireMinion.sh"), "--yes"]]
+
+
+def test_upgrade_in_place_when_the_forwarder_has_nothing_to_forward_to(monkeypatch, tmp_path):
+    # An older minion.py upgraded this install in place and copied the forwarder but not its target.
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "upgrade.sh").write_text('exec "$(dirname "$0")/../upgradeGhostwireMinion.sh" "$@"\n')
+    in_place = []
+    monkeypatch.setattr(minion, "INSTALL_DIR", tmp_path)
+    monkeypatch.setattr(minion.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(minion, "run_detached", lambda argv, name: pytest.fail("ran the forwarder"))
+    monkeypatch.setattr(minion, "_upgrade_in_place", lambda: in_place.append(True) or True)
+    assert minion.start_upgrade() is True
+    assert in_place == [True]
+
+
 def test_destroy_only_deletes_the_standard_install_folder(monkeypatch, tmp_path):
     started = []
     monkeypatch.setattr(minion, "_systemd_running", lambda: True)

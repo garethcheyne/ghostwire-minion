@@ -69,7 +69,7 @@ Last updated: 2026-10-29
 ## Phase 6 — Installer
 **Status:** COMPLETE
 
-- [x] `install.sh` — one-line curl installer from GitHub
+- [x] `installGhostwireMinion.sh` (was `install.sh`) — one-line curl installer from GitHub
 - [x] Non-interactive mode (`--parent`, `--key`, `--port` flags)
 - [x] Interactive mode with prompts and confirmation
 - [x] Multi-distro support (Alpine/OpenRC, Debian/Ubuntu/RHEL/Fedora/CentOS/Arch systemd)
@@ -95,8 +95,8 @@ Last updated: 2026-10-29
 - [x] `config.json` validated at start-up; secrets kept out of logs
 - [x] Registration retries until the parent answers; heartbeat loop can't die; shutdown closes SOCKS5 sessions
 - [x] `/destroy` works (it used to kill itself before removing anything) and handles OpenRC
-- [x] `/upgrade` runs `scripts/upgrade.sh --yes` outside the service sandbox; OpenRC handled
-- [x] `install.sh`: interactive `curl | bash` works, config written safely, steps checked, systemd unit sandboxed
+- [x] `/upgrade` runs `upgradeGhostwireMinion.sh --yes` (was `scripts/upgrade.sh`) outside the service sandbox; OpenRC handled
+- [x] Installer: interactive `curl | bash` works, config written safely, steps checked, systemd unit sandboxed
 - [x] pytest tests for the security-relevant code, run in CI on Python 3.10 and 3.15
 
 ---
@@ -106,7 +106,7 @@ Last updated: 2026-10-29
 
 A compromised Next.js container ran an XMRig miner, a backdoor root user, cron persistence and a worm for five months on a host with nothing watching inside it. The minion is already installed on servers and reporting heartbeats, so a read-only watch mode would have caught every stage. Report: `Desktop\AKGTech-Security-Incident-Report-2026-10-28.html`.
 
-- [ ] Optional `watch` mode (off by default, `--watch` in `install.sh`), reporting to the parent with each heartbeat or on a 5-minute timer. Read-only: it never changes the host.
+- [ ] Optional `watch` mode (off by default, `--watch` in `installGhostwireMinion.sh`), reporting to the parent with each heartbeat or on a 5-minute timer. Read-only: it never changes the host.
 - [ ] **Docker**: per-container CPU and memory (`docker stats`), image, creation time and age, published ports (flag `0.0.0.0`), privileged/root user, and mounts of the Docker socket or host paths. Needs read access to `/var/run/docker.sock`; document the risk.
 - [ ] **Processes** (host and each container through `docker top`): flag executables running from `/tmp`, `/var/tmp` or `/dev/shm`; known miner names and arguments (`xmrig`, `-o host:port -u … -p …`, `stratum+tcp`); unexpected children of web runtimes (anything except `node` under `next-server`).
 - [ ] **Persistence**: hash `/etc/passwd` (flag new UID-0 users), crontabs, `/etc/sudoers.d`, systemd units, and `authorized_keys`, on the host and in containers. Report changes.
